@@ -1,0 +1,16 @@
+[project]
+name = "dataset-gen-dynamic"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.3",
+    "pandas>=3.0.1",
+    "phate>=2.0.0",
+    "umap-learn>=0.5.11",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
