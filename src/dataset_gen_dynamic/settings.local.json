@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/purusharth/Documents/sandbox/dataset-gen-dynamic/**)",
+      "Bash(source .venv/bin/activate)",
+      "Bash(python -c \"import dataset_gen_dynamic\")"
+    ]
+  }
+}
