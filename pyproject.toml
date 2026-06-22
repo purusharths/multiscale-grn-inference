@@ -5,8 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "jax[cpu]>=0.10.1",
     "matplotlib>=3.10.8",
     "numpy>=2.4.3",
+    "optax>=0.2.8",
+    "ott-jax>=0.6.0",
     "pandas>=3.0.1",
     "phate>=2.0.0",
     "umap-learn>=0.5.11",

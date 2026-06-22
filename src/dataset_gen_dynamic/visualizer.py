@@ -352,6 +352,80 @@ def plot_expression_snapshots(
     plt.close(fig)
 
 
+def plot_dynamics_snapshot(
+    expression: pd.DataFrame,
+    metadata: pd.DataFrame,
+    output: str | Path = "dynamics_snapshot.png",
+    n_scatter: int = 200,
+    seed: int = 0,
+) -> None:
+    """
+    Dynamics plot for cross-sectional / destructive-measurement data where each
+    cell has exactly one timepoint.
+
+    Per gene, per population:
+      - Scatter a random subset of individual cells (shows stochastic spread).
+      - Overlay mean ± 1 std ribbon connecting collection timepoints.
+    """
+    gene_cols = [c for c in expression.columns if c.startswith("gene_")]
+    n_genes = len(gene_cols)
+    unique_pops = sorted(metadata["population"].unique())
+    n_pops = len(unique_pops)
+
+    # extend palette if needed
+    palette = POP_PALETTE * (n_pops // len(POP_PALETTE) + 1)
+    pop_color = {p: palette[i] for i, p in enumerate(unique_pops)}
+
+    df = metadata.copy()
+    for g in gene_cols:
+        df[g] = expression[g].values
+
+    rng = np.random.default_rng(seed)
+
+    fig, axes = plt.subplots(n_genes, 1, figsize=(12, 2.8 * n_genes), sharex=True)
+    if n_genes == 1:
+        axes = [axes]
+
+    for ax, gene in zip(axes, gene_cols):
+        for pop in unique_pops:
+            pop_df = df[df["population"] == pop]
+            color = pop_color[pop]
+
+            # --- scatter a random subset of individual cells ---
+            n_plot = min(n_scatter, len(pop_df))
+            sample_idx = rng.choice(len(pop_df), size=n_plot, replace=False)
+            sub = pop_df.iloc[sample_idx]
+            ax.scatter(
+                sub["time"].values,
+                sub[gene].values,
+                color=color,
+                s=6,
+                alpha=0.25,
+                linewidths=0,
+            )
+
+            # --- mean ± std ribbon across collection timepoints ---
+            stats = pop_df.groupby("time")[gene].agg(["mean", "std"]).reset_index()
+            ax.plot(stats["time"], stats["mean"], color=color, linewidth=2.0, label=pop)
+            ax.fill_between(
+                stats["time"],
+                stats["mean"] - stats["std"],
+                stats["mean"] + stats["std"],
+                color=color,
+                alpha=0.15,
+            )
+
+        ax.set_ylabel(gene)
+
+    axes[0].legend(fontsize=8, framealpha=0.8)
+    axes[-1].set_xlabel("Time")
+    fig.suptitle("Population dynamics — cross-sectional snapshots\n(scatter = individual cells, ribbon = mean ± 1 std)", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(output, dpi=150, bbox_inches="tight")
+    print(f"Saved: {output}")
+    plt.close(fig)
+
+
 def _scatter_pop(ax, xy, colors, unique_pops, pop_color, method):
     import matplotlib.patches as mpatches
     ax.scatter(xy[:, 0], xy[:, 1], c=colors, s=3, alpha=0.4, rasterized=True)
