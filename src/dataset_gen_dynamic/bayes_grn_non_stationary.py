@@ -34,7 +34,7 @@ import pandas as pd
 import pymc as pm
 import pytensor.tensor as pt
 
-from dataset_gen_dynamic.non_stationary_sim import NetworkSimulatorNonStationaryMu
+from dataset_gen_dynamic.datagen.non_stationary_sim import NetworkSimulatorNonStationaryMu
 
 # --------------------------------------------------------------------------
 # Config  (mirrors run_non_stationary.py)

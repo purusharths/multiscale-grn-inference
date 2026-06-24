@@ -9,3 +9,7 @@ wheels/
 # Virtual environments
 .venv
 output/
+# Test / coverage artifacts
+.coverage
+coverage.xml
+.pytest_cache/

@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "dataset-gen-dynamic"
 version = "0.1.0"
@@ -15,5 +19,8 @@ dependencies = [
     "umap-learn>=0.5.11",
 ]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+]

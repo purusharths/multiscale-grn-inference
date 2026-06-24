@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from dataset_gen_dynamic.non_stationary_sim import NetworkSimulatorNonStationaryMu
+from dataset_gen_dynamic.datagen.non_stationary_sim import NetworkSimulatorNonStationaryMu
 from dataset_gen_dynamic.visualizer import plot_cell_trajectories, plot_clustermap, plot_dynamics, plot_embeddings, plot_expression_matrix, plot_expression_snapshots
 
 
