@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from dataset_gen_dynamic.datagen.non_stationary_sim import NetworkSimulatorNonStationaryMu
+from multsc_grn_inference.datagen.non_stationary_sim import NetworkSimulatorNonStationaryMu
 
 
 def is_diagonally_dominant(A):

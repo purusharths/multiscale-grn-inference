@@ -2,7 +2,7 @@
 Convert per-timepoint CSV files (produced by run_non_stationary.py) to AnnData .h5ad files.
 
 Usage:
-    python -m dataset_gen_dynamic.housekeeping.csv_to_anndata [INPUT_DIR] [OUTPUT_DIR]
+    python -m multsc_grn_inference.housekeeping.csv_to_anndata [INPUT_DIR] [OUTPUT_DIR]
 
     INPUT_DIR  — directory containing expression_t*.csv files  (default: output/expression_by_timepoint)
     OUTPUT_DIR — where to write .h5ad files                    (default: same as INPUT_DIR)

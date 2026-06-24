@@ -49,10 +49,10 @@ import ot
 import pandas as pd
 from scipy.stats import gaussian_kde, wasserstein_distance
 
-from dataset_gen_dynamic.housekeeping.enforce_diagonal_dominance import (
+from multsc_grn_inference.housekeeping.enforce_diagonal_dominance import (
     enforce_diagonal_dominance,
 )
-from dataset_gen_dynamic.housekeeping.mu_options import (
+from multsc_grn_inference.housekeeping.mu_options import (
     mu_constant,
     mu_heaviside,
     mu_linear,
