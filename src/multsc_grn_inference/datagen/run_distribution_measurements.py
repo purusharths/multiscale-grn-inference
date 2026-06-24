@@ -1,12 +1,21 @@
 """
-Gene-level perturbation simulation: 4 genes, 800 cells across 5 populations.
+Distribution-based destructive measurement simulation.
 
-Population layout (per-gene mu_mode):
-  pop_0  cells   0-399  all 4 genes constant
-  pop_1  cells 400-499  gene_0 = sigmoid,   genes 1-3 constant
-  pop_2  cells 500-599  gene_1 = heaviside, genes 0,2-3 constant
-  pop_3  cells 600-699  gene_2 = linear,    genes 0-1,3 constant
-  pop_4  cells 700-799  gene_3 = tanh,      genes 0-2 constant
+Workflow per population per collection timepoint
+-------------------------------------------------
+1. Simulate a large ensemble of SDE trajectories (NUM_ENSEMBLE cells).
+2. At each COLLECTION_TIME, snapshot all ensemble cells → population cloud
+   in gene-expression space.
+3. Fit a multivariate Gaussian to that cloud (captures mean expression +
+   gene-gene covariance at that moment in time).
+4. Draw N_CELLS_PER_TIMEPOINT samples from the fitted distribution →
+   these are the stored "sequenced" observations.
+
+Why this is more realistic than picking individual trajectories
+--------------------------------------------------------------
+- The number of stored cells is independent of ensemble size.
+- Gene-gene correlations at each timepoint are preserved via the covariance.
+- Smooths over simulation noise; the distribution is the thing that matters.
 """
 
 from pathlib import Path
@@ -14,25 +23,26 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy.stats import multivariate_normal
 
-from dataset_gen_dynamic.housekeeping.enforce_diagonal_dominance import enforce_diagonal_dominance
-from dataset_gen_dynamic.housekeeping.mu_options import (
+from multsc_grn_inference.housekeeping.enforce_diagonal_dominance import enforce_diagonal_dominance
+from multsc_grn_inference.housekeeping.mu_options import (
     mu_constant,
     mu_heaviside,
     mu_linear,
     mu_sigmoid,
 )
-from dataset_gen_dynamic.visualizer import (
-    plot_cell_trajectories,
+from multsc_grn_inference.visualizer import (
     plot_clustermap,
-    plot_dynamics,
+    plot_dynamics_snapshot,
     plot_embeddings,
     plot_expression_matrix,
     plot_expression_snapshots,
 )
 
+
 # ---------------------------------------------------------------------------
-# tanh mu function (not in mu_options yet)
+# tanh mu (same as run_destructive_measurements.py)
 # ---------------------------------------------------------------------------
 
 def mu_tanh(
@@ -44,7 +54,6 @@ def mu_tanh(
     k: float = 5.0,
     **kwargs,
 ) -> np.ndarray:
-    """mu(t) = mu0 + delta * tanh(k * (t - t_star))"""
     if delta is None:
         delta = np.ones_like(mu0)
     if t_star is None:
@@ -53,15 +62,10 @@ def mu_tanh(
 
 
 # ---------------------------------------------------------------------------
-# Per-gene simulator
+# SDE simulator
 # ---------------------------------------------------------------------------
 
 class NetworkSimulatorPerGeneMu:
-    """
-    Identical to NetworkSimulatorNonStationaryMu but accepts a list of
-    mu_mode strings — one per gene — instead of a single global mu_mode.
-    """
-
     def __init__(
         self,
         num_genes: int = 4,
@@ -80,7 +84,7 @@ class NetworkSimulatorPerGeneMu:
         assert len(self.gene_mu_modes) == num_genes
         assert len(self.gene_mu_kwargs) == num_genes
 
-        # Interaction matrix (same construction as original)
+        # Gene regulatory network matrix
         self.A = np.zeros((num_genes, num_genes))
         for i in range(num_genes):
             self.A[i, i] = rng.uniform(1.0, 1.8)
@@ -99,16 +103,13 @@ class NetworkSimulatorPerGeneMu:
         self.mu0 = rng.uniform(2.5, 3.5, num_genes)
         self.D = np.diag(rng.uniform(0.1, 0.2, num_genes))
 
-        # linear drift parameters (per-gene: each gene has its own scalar direction)
         self.mu_drift_dir = rng.normal(size=num_genes)
         self.mu_drift_amp = 4.0
-
-    # ------------------------------------------------------------------
 
     def mu_t(self, t: float, T: float) -> np.ndarray:
         mu = np.empty(self.num_genes)
         for i, (mode, kw) in enumerate(zip(self.gene_mu_modes, self.gene_mu_kwargs)):
-            mu0i = self.mu0[i : i + 1]          # shape (1,) — functions expect array
+            mu0i = self.mu0[i : i + 1]
             diri = self.mu_drift_dir[i : i + 1]
 
             if mode == "constant":
@@ -125,29 +126,37 @@ class NetworkSimulatorPerGeneMu:
                 raise ValueError(f"Unknown mu_mode '{mode}' for gene {i}.")
         return mu
 
-    # ------------------------------------------------------------------
-
-    def simulate(
+    def simulate_ensemble(
         self,
         T: float = 4.0,
-        num_samples: int = 100,
-        save_every: int = 15,
+        num_cells: int = 5000,
+        collection_times: list[float] | None = None,
         dt: float = 0.005,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> dict[float, np.ndarray]:
+        """
+        Simulate `num_cells` independent trajectories and return snapshots of
+        the full population at each collection time.
+
+        Returns
+        -------
+        snapshots : dict mapping collection_time -> array of shape (num_cells, num_genes)
+        """
+        collection_times = sorted(set(collection_times or [T]))
+        # Pre-compute which steps to snapshot
+        snap_steps = {round(t / dt): t for t in collection_times}
+
         steps = int(T / dt)
-        save_steps = steps // save_every
+        snapshots: dict[float, list[np.ndarray]] = {t: [] for t in collection_times}
 
-        data = np.zeros((num_samples, save_steps + 1, self.num_genes))
-        time_grid = np.linspace(0.0, T, save_steps + 1)
-
-        for s in range(num_samples):
+        for _ in range(num_cells):
             mu_init = self.mu_t(0.0, T)
             X = mu_init + 0.5 * self.rng.normal(size=self.num_genes)
             X = np.maximum(X, 0.1)
-            data[s, 0] = X.copy()
 
-            save_idx = 1
-            for step in range(1, steps):
+            if 0 in snap_steps:
+                snapshots[snap_steps[0]].append(X.copy())
+
+            for step in range(1, steps + 1):
                 t = step * dt
                 mu = self.mu_t(t, T)
                 drift = self.A @ (mu - X)
@@ -155,11 +164,36 @@ class NetworkSimulatorPerGeneMu:
                 X += drift * dt + noise
                 X = np.maximum(X, 0.05)
 
-                if step % save_every == 0 and save_idx < save_steps + 1:
-                    data[s, save_idx] = X.copy()
-                    save_idx += 1
+                rounded = round(step)
+                if rounded in snap_steps:
+                    snapshots[snap_steps[rounded]].append(X.copy())
 
-        return data, time_grid
+        return {t: np.array(cells) for t, cells in snapshots.items()}
+
+
+# ---------------------------------------------------------------------------
+# Distribution fitting + sampling
+# ---------------------------------------------------------------------------
+
+def fit_and_sample(
+    population_snapshot: np.ndarray,
+    n_samples: int,
+    rng: np.random.Generator,
+    regularisation: float = 1e-4,
+) -> np.ndarray:
+    """
+    Fit a multivariate Gaussian to `population_snapshot` (shape: n_cells × n_genes)
+    and draw `n_samples` from it.
+
+    `regularisation` adds a small diagonal to the covariance to prevent
+    singular matrices when genes are nearly collinear.
+    """
+    mean = population_snapshot.mean(axis=0)
+    cov  = np.cov(population_snapshot, rowvar=False)
+    cov += regularisation * np.eye(cov.shape[0])
+
+    samples = rng.multivariate_normal(mean, cov, size=n_samples)
+    return np.maximum(samples, 0.0)   # expression is non-negative
 
 
 # ---------------------------------------------------------------------------
@@ -172,69 +206,48 @@ POPULATIONS = [
     {
         "label":          "pop_0",
         "seed":           10,
-        "num_samples":    400,
         "gene_mu_modes":  ["constant",  "constant",  "constant", "constant"],
         "gene_mu_kwargs": [{},          {},          {},         {}],
     },
     {
         "label":          "pop_1",
         "seed":           11,
-        "num_samples":    100,
         "gene_mu_modes":  ["sigmoid",   "constant",  "constant", "constant"],
         "gene_mu_kwargs": [{},          {},          {},         {}],
     },
     {
         "label":          "pop_2",
         "seed":           12,
-        "num_samples":    100,
         "gene_mu_modes":  ["constant",  "heaviside", "constant", "constant"],
         "gene_mu_kwargs": [{},          {},          {},         {}],
     },
     {
         "label":          "pop_3",
         "seed":           13,
-        "num_samples":    100,
         "gene_mu_modes":  ["constant",  "constant",  "linear",   "constant"],
         "gene_mu_kwargs": [{},          {},          {},         {}],
     },
     {
         "label":          "pop_4",
         "seed":           14,
-        "num_samples":    100,
         "gene_mu_modes":  ["constant",  "constant",  "constant", "tanh"],
         "gene_mu_kwargs": [{},          {},          {},         {}],
     },
 ]
 
+# Sparse experimental collection timepoints
+COLLECTION_TIMES = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
+
+# Cells drawn from the fitted distribution per timepoint per population
+N_CELLS_PER_TIMEPOINT = 1000
+
+# Size of the SDE ensemble used to build the distribution (not stored directly)
+NUM_ENSEMBLE = 5000
+
 
 # ---------------------------------------------------------------------------
-# Helpers (copied / adapted from run_non_stationary.py)
+# Helpers
 # ---------------------------------------------------------------------------
-
-def _sim_to_dataframes(
-    data: np.ndarray,
-    time_grid: np.ndarray,
-    population_label: str = "pop_0",
-    cell_id_offset: int = 0,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    num_samples, _, num_genes = data.shape
-    gene_cols = [f"gene_{i}" for i in range(num_genes)]
-    rows_expr, rows_meta = [], []
-
-    for s in range(num_samples):
-        for t_idx, t in enumerate(time_grid):
-            rows_expr.append(data[s, t_idx])
-            rows_meta.append({
-                "cell_id":    cell_id_offset + s,
-                "time":       t,
-                "population": population_label,
-                "pseudotime": t / time_grid[-1],
-            })
-
-    expression = pd.DataFrame(rows_expr, columns=gene_cols)
-    metadata   = pd.DataFrame(rows_meta)
-    return expression, metadata
-
 
 def _save_timepoints(combined: pd.DataFrame, out_dir: Path) -> None:
     for t_val, group in combined.groupby("time"):
@@ -247,40 +260,16 @@ def _save_timepoints(combined: pd.DataFrame, out_dir: Path) -> None:
         )
 
 
-def plot_phase(
-    data: np.ndarray,
-    time_grid: np.ndarray,
-    gene_x: int = 0,
-    gene_y: int = 1,
-    output: str | Path = "phase.png",
-    n_show: int = 80,
-) -> None:
-    num_samples = data.shape[0]
-    idx = np.random.default_rng(0).choice(num_samples, size=min(n_show, num_samples), replace=False)
-    norm = plt.Normalize(time_grid[0], time_grid[-1])
-    cmap = plt.cm.viridis
-
-    fig, ax = plt.subplots(figsize=(7, 6))
-    for i in idx:
-        tx, ty = data[i, :, gene_x], data[i, :, gene_y]
-        for t in range(len(time_grid) - 1):
-            ax.plot(tx[t:t+2], ty[t:t+2], color=cmap(norm(time_grid[t])), linewidth=0.7, alpha=0.4)
-
-    mean_x = data[:, :, gene_x].mean(axis=0)
-    mean_y = data[:, :, gene_y].mean(axis=0)
-    ax.plot(mean_x, mean_y, color="white", linewidth=2.5, label="mean", zorder=5)
-    ax.plot(mean_x, mean_y, color="black", linewidth=1.0, zorder=4)
-    ax.scatter([mean_x[0]],  [mean_y[0]],  color="lime", s=60, zorder=6, label="t=0")
-    ax.scatter([mean_x[-1]], [mean_y[-1]], color="red",  s=60, zorder=6, label=f"t={time_grid[-1]:.1f}")
-
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    fig.colorbar(sm, ax=ax, label="time")
-    ax.set_xlabel(f"gene_{gene_x}")
-    ax.set_ylabel(f"gene_{gene_y}")
-    ax.set_title("Phase plot — gene-level perturbation", fontsize=12)
-    ax.legend(fontsize=9)
-    ax.set_facecolor("#1a1a2e")
+def plot_snapshot_counts(metadata: pd.DataFrame, output: str | Path) -> None:
+    counts = metadata.groupby("time").size().reset_index(name="n_cells")
+    fig, ax = plt.subplots(figsize=(10, 3))
+    ax.bar(
+        counts["time"], counts["n_cells"],
+        width=0.08, color="steelblue", edgecolor="white", linewidth=0.3,
+    )
+    ax.set_xlabel("Collection timepoint")
+    ax.set_ylabel("Cells stored")
+    ax.set_title("Cells per timepoint (distribution-sampled destructive measurements)")
     fig.tight_layout()
     fig.savefig(output, dpi=150, bbox_inches="tight")
     print(f"Saved: {output}")
@@ -292,15 +281,15 @@ def plot_phase(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    out_dir = Path("output-gene-perturb-major/")
+    out_dir = Path("output-distribution-measurements/")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     all_expr, all_meta = [], []
     cell_offset = 0
+    gene_cols = [f"gene_{i}" for i in range(NUM_GENES)]
 
     for pop in POPULATIONS:
-        print(f"Simulating {pop['label']} "
-              f"(gene_mu_modes={pop['gene_mu_modes']}) ...")
+        print(f"Simulating ensemble for {pop['label']} ...")
         sim = NetworkSimulatorPerGeneMu(
             num_genes=NUM_GENES,
             network_density=0.3,
@@ -308,52 +297,62 @@ def main() -> None:
             gene_mu_modes=pop["gene_mu_modes"],
             gene_mu_kwargs=pop["gene_mu_kwargs"],
         )
-        data, time_grid = sim.simulate(
-            T=4.0,
-            num_samples=pop["num_samples"],
-            save_every=15,
+
+        snapshots = sim.simulate_ensemble(
+            T=max(COLLECTION_TIMES),
+            num_cells=NUM_ENSEMBLE,
+            collection_times=COLLECTION_TIMES,
             dt=0.005,
         )
-        print(f"  data shape: {data.shape}")
+        print(f"  Ensemble snapshots at {len(snapshots)} timepoints × {NUM_ENSEMBLE} cells each")
 
-        # ground-truth GRN
-        gene_names = [f"gene_{i}" for i in range(NUM_GENES)]
-        pd.DataFrame(sim.A, index=gene_names, columns=gene_names).to_csv(
+        # Save GRN for this population
+        pd.DataFrame(sim.A, index=gene_cols, columns=gene_cols).to_csv(
             out_dir / f"grn_weighted_{pop['label']}.csv"
         )
         pd.DataFrame(
-            (sim.A != 0).astype(int), index=gene_names, columns=gene_names
+            (sim.A != 0).astype(int), index=gene_cols, columns=gene_cols
         ).to_csv(out_dir / f"grn_adjacency_{pop['label']}.csv")
 
-        expr, meta = _sim_to_dataframes(
-            data, time_grid,
-            population_label=pop["label"],
-            cell_id_offset=cell_offset,
-        )
+        # Fit distribution at each collection time; sample stored observations
+        rng = np.random.default_rng(pop["seed"] + 200)
+        T_max = max(COLLECTION_TIMES)
+
+        rows_expr, rows_meta = [], []
+        obs_id = 0
+        for t in sorted(snapshots):
+            population_cloud = snapshots[t]           # shape: (NUM_ENSEMBLE, NUM_GENES)
+            sampled = fit_and_sample(population_cloud, N_CELLS_PER_TIMEPOINT, rng)
+
+            for cell_expr in sampled:
+                rows_expr.append(cell_expr)
+                rows_meta.append({
+                    "cell_id":    cell_offset + obs_id,
+                    "time":       t,
+                    "population": pop["label"],
+                    "pseudotime": t / T_max,
+                })
+                obs_id += 1
+
+        expr = pd.DataFrame(rows_expr, columns=gene_cols)
+        meta = pd.DataFrame(rows_meta)
+
+        print(f"  Stored {len(expr)} observations for {pop['label']}")
         all_expr.append(expr)
         all_meta.append(meta)
-        cell_offset += data.shape[0]
+        cell_offset += obs_id
 
     expression = pd.concat(all_expr, ignore_index=True)
     metadata   = pd.concat(all_meta, ignore_index=True)
     print(
-        f"Combined: {metadata['cell_id'].nunique()} cells × "
+        f"\nCombined dataset: {len(expression)} cells × "
         f"{expression.shape[1]} genes × "
-        f"{metadata['population'].nunique()} populations  "
-        f"({len(expression)} total observations)"
+        f"{metadata['population'].nunique()} populations"
     )
 
-    # Phase plot (pop_1 = sigmoid on gene_0, gene_0 vs gene_1)
-    print("Plotting phase plot ...")
-    sim_phase = NetworkSimulatorPerGeneMu(
-        num_genes=NUM_GENES, network_density=0.3, seed=11,
-        gene_mu_modes=["sigmoid", "constant", "constant", "constant"],
-    )
-    pop1_data, _ = sim_phase.simulate(T=4.0, num_samples=100, save_every=15, dt=0.005)
-    plot_phase(pop1_data, time_grid, gene_x=0, gene_y=1,
-               output=out_dir / "phase_gene_perturb.png")
+    print("Plotting snapshot counts ...")
+    plot_snapshot_counts(metadata, out_dir / "snapshot_counts.png")
 
-    # Per-timepoint CSVs
     print("Saving per-timepoint expression matrices ...")
     timepoints_dir = out_dir / "expression_by_timepoint"
     timepoints_dir.mkdir(parents=True, exist_ok=True)
@@ -361,20 +360,13 @@ def main() -> None:
     _save_timepoints(combined, timepoints_dir)
     print(f"  Saved {combined['time'].nunique()} timepoint files to {timepoints_dir}/")
 
-    print("Plotting cell trajectories ...")
-    plot_cell_trajectories(
-        expression, metadata,
-        n_cells=6,
-        output=out_dir / "cell_trajectories_gene_perturb.png",
-    )
-
     print("Plotting dynamics ...")
-    plot_dynamics(expression, metadata, output=out_dir / "dynamics_gene_perturb.png")
+    plot_dynamics_snapshot(expression, metadata, output=out_dir / "dynamics.png")
 
     print("Plotting UMAP + PHATE embeddings ...")
     plot_embeddings(
         expression, metadata,
-        output=out_dir / "embeddings_gene_perturb.png",
+        output=out_dir / "embeddings.png",
         include_pca=True,
     )
 
@@ -382,21 +374,21 @@ def main() -> None:
     plot_expression_matrix(
         expression, metadata,
         n_cells=50,
-        output=out_dir / "expression_matrix_gene_perturb.png",
+        output=out_dir / "expression_matrix.png",
     )
 
     print("Plotting expression snapshots ...")
     plot_expression_snapshots(
         expression, metadata,
         n_timepoints=4,
-        output=out_dir / "expression_snapshots_gene_perturb.png",
+        output=out_dir / "expression_snapshots.png",
     )
 
     print("Plotting clustermap ...")
     plot_clustermap(
         expression, metadata,
         n_cells=100,
-        output=out_dir / "clustermap_gene_perturb.png",
+        output=out_dir / "clustermap.png",
         explicit_cell_pop=True,
     )
 

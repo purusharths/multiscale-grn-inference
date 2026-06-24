@@ -1,7 +1,7 @@
 import numpy as np
 
-from .housekeeping.enforce_diagonal_dominance import enforce_diagonal_dominance
-from .housekeeping.mu_options import mu_constant, mu_heaviside, mu_linear, mu_sigmoid
+from ..housekeeping.enforce_diagonal_dominance import enforce_diagonal_dominance
+from ..housekeeping.mu_options import mu_constant, mu_heaviside, mu_linear, mu_sigmoid
 
 
 class NetworkSimulatorNonStationaryMu:
