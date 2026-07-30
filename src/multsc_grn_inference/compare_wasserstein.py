@@ -1,3 +1,7 @@
+@ Todo:
+Move to housekeeping and import 
+
+
 """
 Wasserstein comparison: destructive measurements vs distributional measurements.
 

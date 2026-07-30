@@ -6,9 +6,6 @@ from ott.geometry import pointcloud
 from ott.tools import sinkhorn_divergence
 from scipy.stats import gaussian_kde
 
-# ---------------------------------------------------------------------------
-# OU simulation
-# ---------------------------------------------------------------------------
 
 def simulate_ou(X0, A, mu, sigma, dt, n_steps=1, rng=None):
     """
@@ -27,10 +24,6 @@ def simulate_ou(X0, A, mu, sigma, dt, n_steps=1, rng=None):
     return X
 
 
-# ---------------------------------------------------------------------------
-# Primitives
-# ---------------------------------------------------------------------------
-
 def kde_sample(X, n_samples, rng):
     """Draw n_samples from a Gaussian KDE fitted to particle cloud X (N, G)."""
     try:
@@ -43,11 +36,8 @@ def kde_sample(X, n_samples, rng):
     return np.maximum(kde.resample(n_samples, seed=seed_val).T, 0.0)
 
 
-def w2(X, Y, epsilon=0.01):
-    """
-    Sinkhorn divergence (debiased) approximation of W2.
-    Returns a Python float.
-    """
+def w2(X, Y, epsilon=0.05):
+    """Sinkhorn divergence (debiased) W2. Accurate but slow — use for analysis."""
     out = sinkhorn_divergence.sinkhorn_divergence(
         pointcloud.PointCloud,
         jnp.array(X), jnp.array(Y),
@@ -56,126 +46,153 @@ def w2(X, Y, epsilon=0.01):
     return float(out[0])
 
 
+def sliced_w2(X, Y, n_proj=50, seed=0):
+    """Sliced Wasserstein² — ~50× faster than Sinkhorn. Default for optimisation."""
+    rng  = np.random.default_rng(seed)
+    G    = X.shape[1]
+    dirs = rng.standard_normal((n_proj, G))
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True) + 1e-12
+    n_min = min(len(X), len(Y))
+    t_x = np.linspace(0, 1, len(X))
+    t_y = np.linspace(0, 1, len(Y))
+    t_q = np.linspace(0, 1, n_min)
+    total = 0.0
+    for d in dirs:
+        total += float(np.mean(
+            (np.interp(t_q, t_x, np.sort(X @ d)) -
+             np.interp(t_q, t_y, np.sort(Y @ d))) ** 2
+        ))
+    return total / n_proj
+
+
 # ---------------------------------------------------------------------------
 # Loss functions  (single timestep)
+# dist_fn : callable (X, Y) -> float   default = sliced_w2 (fast)
+#           pass w2 or functools.partial(w2, epsilon=0.05) for Sinkhorn
 # ---------------------------------------------------------------------------
 
-def ou_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=1, epsilon=0.01, seed=0):
-    """
-    L_OU = W2( KDE(Φ_OU(X_t0; θ)),  KDE(X_t1) )
-    """
+def ou_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=1, seed=0, dist_fn=None):
+    """L_OU = dist( KDE(Φ_OU(X_t0; θ)),  KDE(X_t1) )"""
+    _d = dist_fn if dist_fn is not None else sliced_w2
     rng = np.random.default_rng(seed)
     X_sim     = simulate_ou(X_t0, A, mu, sigma, dt, n_steps=n_steps, rng=rng)
     X_sim_kde = kde_sample(X_sim, len(X_sim), rng)
     X_t1_kde  = kde_sample(X_t1,  len(X_t1),  rng)
-    return w2(X_sim_kde, X_t1_kde, epsilon=epsilon)
+    return _d(X_sim_kde, X_t1_kde)
 
 
-def fp_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=1, epsilon=0.01, seed=0):
-    """
-    L_FP = W2( KDE(Φ_OU( KDE_sample(X_t0) ; θ )),  KDE(X_t1) )
-    """
+def fp_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=1, seed=0, dist_fn=None):
+    """L_FP = dist( KDE(Φ_OU( KDE_sample(X_t0); θ )),  KDE(X_t1) )"""
+    _d = dist_fn if dist_fn is not None else sliced_w2
     rng = np.random.default_rng(seed)
     X_fp      = kde_sample(X_t0, len(X_t0), rng)
     X_fp_sim  = simulate_ou(X_fp, A, mu, sigma, dt, n_steps=n_steps, rng=rng)
     X_fp_kde  = kde_sample(X_fp_sim, len(X_fp_sim), rng)
     X_t1_kde  = kde_sample(X_t1,     len(X_t1),     rng)
-    return w2(X_fp_kde, X_t1_kde, epsilon=epsilon)
+    return _d(X_fp_kde, X_t1_kde)
 
 
-def consistency_loss_single_step(X_t0, _X_t1, A, mu, sigma, dt, n_steps=1, epsilon=0.01, seed=0):
-    """
-    L_cons = W2( KDE(Φ_OU(X_t0; θ)),  KDE(Φ_OU(KDE_sample(X_t0); θ)) )
-
-    Does not use X_t1 — measures self-consistency of the two push-forwards.
-    """
+def consistency_loss_single_step(X_t0, _X_t1, A, mu, sigma, dt, n_steps=1, seed=0, dist_fn=None):
+    """L_cons = dist( KDE(Φ_OU(X_t0; θ)),  KDE(Φ_OU(KDE_sample(X_t0); θ)) )"""
+    _d = dist_fn if dist_fn is not None else sliced_w2
     rng = np.random.default_rng(seed)
     X_ou     = simulate_ou(X_t0, A, mu, sigma, dt, n_steps=n_steps, rng=rng)
     X_ou_kde = kde_sample(X_ou, len(X_ou), rng)
-
     X_fp     = kde_sample(X_t0, len(X_t0), rng)
     X_fp_sim = simulate_ou(X_fp, A, mu, sigma, dt, n_steps=n_steps, rng=rng)
     X_fp_kde = kde_sample(X_fp_sim, len(X_fp_sim), rng)
+    return _d(X_ou_kde, X_fp_kde)
 
-    return w2(X_ou_kde, X_fp_kde, epsilon=epsilon)
 
-
-def ou_fp_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=1, epsilon=0.01, seed=0):
+def ou_fp_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=1, seed=0, dist_fn=None):
     """L_OU + L_FP"""
     return (
-        ou_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=n_steps, epsilon=epsilon, seed=seed)
-        + fp_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=n_steps, epsilon=epsilon, seed=seed)
+        ou_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=n_steps, seed=seed, dist_fn=dist_fn)
+        + fp_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=n_steps, seed=seed, dist_fn=dist_fn)
     )
 
 
-def total_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=1, epsilon=0.01, seed=0):
+def total_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=1, seed=0, dist_fn=None):
     """L_OU + L_FP + L_cons"""
     return (
-        ou_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=n_steps, epsilon=epsilon, seed=seed)
-        + fp_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=n_steps, epsilon=epsilon, seed=seed)
-        + consistency_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=n_steps, epsilon=epsilon, seed=seed)
+        ou_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=n_steps, seed=seed, dist_fn=dist_fn)
+        + fp_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=n_steps, seed=seed, dist_fn=dist_fn)
+        + consistency_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=n_steps, seed=seed, dist_fn=dist_fn)
     )
 
 
-def weighted_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=1, epsilon=0.01, seed=0, lam=1.0):
+def weighted_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=1, seed=0, dist_fn=None, lam=1.0):
     """L_OU + L_FP + lam * L_cons"""
     return (
-        ou_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=n_steps, epsilon=epsilon, seed=seed)
-        + fp_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=n_steps, epsilon=epsilon, seed=seed)
-        + lam * consistency_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=n_steps, epsilon=epsilon, seed=seed)
+        ou_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=n_steps, seed=seed, dist_fn=dist_fn)
+        + fp_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=n_steps, seed=seed, dist_fn=dist_fn)
+        + lam * consistency_loss_single_step(X_t0, X_t1, A, mu, sigma, dt, n_steps=n_steps, seed=seed, dist_fn=dist_fn)
     )
 
 
-# ---------------------------------------------------------------------------
-# Parameter encoding  (diagonal A, 2 genes)
-# θ = [log_a0, log_a1, mu0, mu1, log_sigma]
-# ---------------------------------------------------------------------------
 
 def encode(A, mu, sigma):
-    return np.array([
-        np.log(A[0, 0]), np.log(A[1, 1]),
-        mu[0], mu[1],
-        np.log(sigma),
-    ])
+    """θ = [log_a00,...,log_aGG (diag), off-diag row-major, mu0,...,muG, log_sigma]."""
+    G = len(mu)
+    log_diag = [np.log(A[g, g]) for g in range(G)]
+    off_diag = [A[i, j] for i in range(G) for j in range(G) if i != j]
+    return np.array(log_diag + off_diag + list(mu) + [np.log(sigma)])
 
 
 def decode(theta):
-    log_a0, log_a1, mu0, mu1, log_sigma = theta
-    A     = np.diag([np.exp(log_a0), np.exp(log_a1)])
-    mu    = np.array([mu0, mu1])
-    sigma = float(np.exp(log_sigma))
+    """Inverse of encode. Infers G from len(theta) = G² + G + 1."""
+    n = len(theta)
+    G = int(round((-1 + np.sqrt(1 + 4 * (n - 1))) / 2))
+    A = np.zeros((G, G))
+    for g in range(G):
+        A[g, g] = np.exp(theta[g])
+    off_idx = G
+    for i in range(G):
+        for j in range(G):
+            if i != j:
+                A[i, j] = theta[off_idx]
+                off_idx += 1
+    mu    = np.array(theta[G * G: G * G + G])
+    sigma = float(np.exp(theta[-1]))
     return A, mu, sigma
 
 
-# ---------------------------------------------------------------------------
-# Optimizer
-# ---------------------------------------------------------------------------
-
 def optimize(loss_fn, X_t0, X_t1, dt, init_theta,
-             n_steps=50, epsilon=0.01, seed=0):
+             n_steps=50, seed=0, dist_fn=None):
     """
     Minimize loss_fn over θ = [log_a0, log_a1, mu0, mu1, log_sigma].
 
+    dist_fn : distance function (X, Y) -> float
+              default = sliced_w2 (fast); pass w2 for Sinkhorn accuracy.
+
     Returns
     -------
-    A_opt, mu_opt, sigma_opt : recovered parameters
-    res                      : raw scipy OptimizeResult
+    (A_opt, mu_opt, sigma_opt), res, history
+    history : list of objective values at every function evaluation
     """
+    history = []
+
     def objective(theta):
         A, mu, sigma = decode(theta)
-        return loss_fn(X_t0, X_t1, A, mu, sigma, dt,
-                       n_steps=n_steps, epsilon=epsilon, seed=seed)
+        val = loss_fn(X_t0, X_t1, A, mu, sigma, dt,
+                      n_steps=n_steps, seed=seed, dist_fn=dist_fn)
+        history.append(val)
+        return val
 
     res = scipy.optimize.minimize(
         objective, init_theta, method="Nelder-Mead",
-        options={"maxiter": 2000, "xatol": 1e-3, "fatol": 1e-5, "adaptive": True},
+        options={"maxiter": 5000, "xatol": 1e-3, "fatol": 1e-5, "adaptive": True},
     )
-    return decode(res.x), res
+    return decode(res.x), res, history
 
 
 # ---------------------------------------------------------------------------
 # Plots
 # ---------------------------------------------------------------------------
+
+_POP_PALETTE   = ["#3B4CC0", "#C76DB4", "#E07A5F", "#6EC5E9", "#FAC748"]
+_RESULT_COLORS = {"ou+fp": "royalblue", "ou+fp+cons": "crimson"}
+_ARROW_COLOR   = "#C8C8C8"
 
 def plot_snapshots_line(snapshots, dt, out_path="line_plot.png",
                         true_A=None, true_mu=None):
@@ -194,8 +211,7 @@ def plot_snapshots_line(snapshots, dt, out_path="line_plot.png",
     if n_genes == 1:
         axes = [axes]
 
-    cmap   = plt.cm.plasma
-    colors = [cmap(i / max(len(snapshots) - 1, 1)) for i in range(len(snapshots))]
+    colors = [_POP_PALETTE[i % len(_POP_PALETTE)] for i in range(len(snapshots))]
 
     n_show = min(60, len(snapshots[0]))
     idx    = rng0.choice(len(snapshots[0]), n_show, replace=False)
@@ -259,74 +275,104 @@ def _mean_trajectory(snapshots, A, mu, dt):
     return traj
 
 
-def plot_phase_portrait(snapshots, A, mu, dt, out_path="phase_portrait.png",
-                        results=None):
+def plot_phase_portrait(snapshots, A, mu, dt, out_path="phase_portrait.svg", results=None):
     """
-    Phase portrait in gene-0 × gene-1 space.
+    G×G subplot grid (G = min(n_genes, 3)).
 
-    Left panel  — cell scatter coloured by timepoint + OU drift streamlines.
-    Right panel — mean trajectories: observed (black), true OU (green dashed),
-                  and one dotted line per entry in results (recovered params).
+    Diagonal (g, g)     — mean expression vs time for gene g.
+    Off-diagonal (i, j) — quiver drift field in gene_j × gene_i space,
+                          snapshot scatter, and mean trajectories overlaid.
     """
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    G      = min(snapshots[0].shape[1], 3)
+    times  = [k * dt for k in range(len(snapshots))]
+    all_X  = np.vstack(snapshots)
+    mean_X = all_X.mean(axis=0)
 
-    cmap   = plt.cm.plasma
-    colors = [cmap(i / max(len(snapshots) - 1, 1)) for i in range(len(snapshots))]
+    fig, axes = plt.subplots(G, G, figsize=(5 * G, 5 * G))
+    if G == 1:
+        axes = np.array([[axes]])
 
-    all_X = np.vstack(snapshots)
-    x_lo, x_hi = all_X[:, 0].min(), all_X[:, 0].max()
-    y_lo, y_hi = all_X[:, 1].min(), all_X[:, 1].max()
-    pad = 0.3
-    gx = np.linspace(x_lo - pad, x_hi + pad, 20)
-    gy = np.linspace(y_lo - pad, y_hi + pad, 20)
-    GX, GY = np.meshgrid(gx, gy)
-    pts   = np.stack([GX.ravel(), GY.ravel()], axis=1)
-    drift = (mu - pts) @ A.T
-    DX    = drift[:, 0].reshape(GX.shape)
-    DY    = drift[:, 1].reshape(GY.shape)
-    speed = np.sqrt(DX**2 + DY**2) + 1e-9
+    t_colors = [_POP_PALETTE[k % len(_POP_PALETTE)] for k in range(len(snapshots))]
 
-    for ax in axes:
-        ax.streamplot(gx, gy, DX, DY, color=speed, cmap="Greens",
-                      linewidth=0.8, arrowsize=0.8, density=1.2)
-        for i, (snap, col) in enumerate(zip(snapshots, colors)):
-            ax.scatter(snap[:, 0], snap[:, 1], s=4, alpha=0.3, color=col,
-                       label=f"t{i}")
-        ax.scatter(*mu, marker="*", s=180, color="white", edgecolors="black",
-                   zorder=5, label="μ (target)")
-        ax.set_xlabel("gene 0")
-        ax.set_ylabel("gene 1")
-
-    axes[0].set_title("Drift field  +  snapshot scatter")
-    axes[0].legend(fontsize=7, markerscale=2, loc="upper left")
-
-    # right panel: mean trajectories
+    # precompute trajectories
     means_obs = [s.mean(axis=0) for s in snapshots]
-    axes[1].plot([m[0] for m in means_obs], [m[1] for m in means_obs],
-                 color="black", lw=2, marker="o", ms=6, zorder=5,
-                 label="observed mean")
-
     true_traj = _mean_trajectory(snapshots, A, mu, dt)
-    axes[1].plot([m[0] for m in true_traj], [m[1] for m in true_traj],
-                 color="tab:green", lw=2, ls="--", marker="s", ms=6, zorder=4,
-                 label="true OU mean")
 
-    if results is not None:
-        res_colors = plt.cm.tab10(np.linspace(0, 0.8, len(results)))
-        for (name, res), col in zip(results.items(), res_colors):
-            A_r  = np.diag([res["a0"], res["a1"]])
-            mu_r = np.array([res["mu0"], res["mu1"]])
-            traj = _mean_trajectory(snapshots, A_r, mu_r, dt)
-            axes[1].plot([m[0] for m in traj], [m[1] for m in traj],
-                         color=col, lw=1.5, ls=":", marker="^", ms=5, zorder=3,
-                         label=name)
+    res_colors      = []
+    recovered_trajs = []
+    if results:
+        res_colors = [_RESULT_COLORS.get(n, _POP_PALETTE[i % len(_POP_PALETTE)])
+                      for i, n in enumerate(results.keys())]
+        for name, res in results.items():
+            recovered_trajs.append((name, _mean_trajectory(snapshots, res["A"], res["mu"], dt)))
 
-    axes[1].set_title("Mean trajectories")
-    axes[1].legend(fontsize=8)
+    for row in range(G):
+        for col in range(G):
+            ax = axes[row, col]
 
-    fig.suptitle("Phase portrait  (OU drift field in gene space)", fontsize=12)
+            if row == col:
+                # ---- diagonal: time series for gene row --------------------
+                ax.plot(times, [m[row] for m in means_obs],
+                        color="black", lw=2.5, marker="o", ms=7, label="observed")
+                ax.plot(times, [m[row] for m in true_traj],
+                        color="tab:green", lw=2, ls="--", marker="s", ms=6,
+                        label="true OU")
+                for (name, traj), c in zip(recovered_trajs, res_colors):
+                    ax.plot(times, [m[row] for m in traj],
+                            color=c, lw=1.8, ls=":", marker="^", ms=6, label=name)
+                ax.set_xlabel("time")
+                ax.set_ylabel("mean expression")
+                ax.set_title(f"gene {row}")
+                ax.set_xticks(times)
+                if row == 0 and col == 0:
+                    ax.legend(fontsize=7)
+
+            else:
+                # ---- off-diagonal: phase portrait in gene_col × gene_row ---
+                xi_lo, xi_hi = all_X[:, col].min(), all_X[:, col].max()
+                yi_lo, yi_hi = all_X[:, row].min(), all_X[:, row].max()
+                pad = 0.3
+                gx = np.linspace(xi_lo - pad, xi_hi + pad, 10)
+                gy = np.linspace(yi_lo - pad, yi_hi + pad, 10)
+                GX, GY = np.meshgrid(gx, gy)
+
+                DX_g = np.zeros_like(GX)
+                DY_g = np.zeros_like(GY)
+                for ii in range(GX.shape[0]):
+                    for jj in range(GX.shape[1]):
+                        x_pt         = mean_X.copy()
+                        x_pt[col]    = GX[ii, jj]
+                        x_pt[row]    = GY[ii, jj]
+                        d            = A @ (mu - x_pt)
+                        DX_g[ii, jj] = d[col]
+                        DY_g[ii, jj] = d[row]
+
+                spd = np.sqrt(DX_g**2 + DY_g**2) + 1e-9
+                ax.quiver(GX, GY, DX_g / spd, DY_g / spd,
+                          color=_ARROW_COLOR, alpha=0.7, scale=20, width=0.004)
+
+                # scatter
+                for snap, c in zip(snapshots, t_colors):
+                    ax.scatter(snap[:, col], snap[:, row], s=3, alpha=0.25, color=c)
+
+                # mean trajectories
+                ax.plot([m[col] for m in means_obs], [m[row] for m in means_obs],
+                        color="black", lw=2, marker="o", ms=6)
+                ax.plot([m[col] for m in true_traj], [m[row] for m in true_traj],
+                        color="tab:green", lw=2, ls="--", marker="s", ms=5)
+                for (name, traj), c in zip(recovered_trajs, res_colors):
+                    ax.plot([m[col] for m in traj], [m[row] for m in traj],
+                            color=c, lw=1.5, ls=":", marker="^", ms=5)
+
+                ax.scatter([mu[col]], [mu[row]], marker="*", s=150,
+                           color="white", edgecolors="black", zorder=5)
+                ax.set_xlabel(f"gene {col}")
+                ax.set_ylabel(f"gene {row}")
+
+    fig.suptitle("Pairwise phase portraits + mean trajectories  (diagonal = time series)",
+                 fontsize=12)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved: {out_path}")
 
@@ -362,16 +408,31 @@ def plot_loss_landscape(X_t0, X_t1, dt, true_A, true_mu, true_sigma,
             for name, fn in loss_fns.items():
                 grids[name][i, j] = fn(
                     X_t0, X_t1, A_, mu_, true_sigma, dt,
-                    epsilon=epsilon, seed=seed,
+                    seed=seed,
                 )
             done += len(loss_fns)
             if done % (n_grid * len(loss_fns)) == 0:
                 print(f"  landscape: {done}/{total}")
 
+    # quiver subsample — every other grid point to avoid clutter
+    step = max(1, n_grid // 10)
+    qa   = a0_vals[::step]
+    qmu  = mu0_vals[::step]
+    QA, QMU = np.meshgrid(qa, qmu)
+
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
     for ax, (name, grid) in zip(axes, grids.items()):
         im = ax.contourf(a0_vals, mu0_vals, grid, levels=20, cmap="RdYlGn_r")
         fig.colorbar(im, ax=ax, label="loss")
+
+        # gradient (finite diff on the grid) → quiver arrows pointing downhill
+        dL_dmu, dL_da = np.gradient(grid, mu0_vals, a0_vals)
+        ga = -dL_da[::step, ::step]
+        gmu = -dL_dmu[::step, ::step]
+        mag = np.sqrt(ga**2 + gmu**2) + 1e-12
+        ax.quiver(QA, QMU, ga / mag, gmu / mag,
+                  color=_ARROW_COLOR, alpha=0.8, scale=25, width=0.004)
+
         ax.axvline(a0_true,  color="white", lw=1.5, ls="--")
         ax.axhline(mu0_true, color="white", lw=1.5, ls="--")
         ax.scatter([a0_true], [mu0_true], color="white", s=80,
@@ -393,12 +454,17 @@ def plot_recovery(results, true_A, true_mu, true_sigma, out_path="recovery.png")
     """
     Bar chart of recovered vs true parameters for each loss.
     """
-    param_names  = ["a0", "a1", "mu0", "mu1", "sigma"]
-    true_vals    = [true_A[0,0], true_A[1,1], true_mu[0], true_mu[1], true_sigma]
+    G            = true_A.shape[0]
+    param_names  = ([f"a{i}{j}" for i in range(G) for j in range(G)]
+                    + [f"mu{g}" for g in range(G)] + ["sigma"])
+    true_vals    = ([true_A[i, j] for i in range(G) for j in range(G)]
+                    + list(true_mu) + [true_sigma])
     loss_names   = list(results.keys())
 
-    fig, axes = plt.subplots(1, len(param_names), figsize=(14, 3.5), sharey=False)
-    colors = plt.cm.tab10(np.linspace(0, 0.5, len(loss_names)))
+    fig, axes = plt.subplots(1, len(param_names),
+                             figsize=(2.2 * len(param_names), 3.5), sharey=False)
+    colors = [_RESULT_COLORS.get(n, _POP_PALETTE[i % len(_POP_PALETTE)])
+              for i, n in enumerate(loss_names)]
 
     for ax, pname, true_val in zip(axes, param_names, true_vals):
         recovered = [results[ln][pname] for ln in loss_names]
@@ -418,6 +484,110 @@ def plot_recovery(results, true_A, true_mu, true_sigma, out_path="recovery.png")
     print(f"Saved: {out_path}")
 
 
+def plot_convergence(histories, out_path="convergence.png"):
+    """
+    Objective value vs number of function evaluations, one line per loss.
+    Uses a running minimum so the curve is always non-increasing (best-so-far).
+    """
+    fig, ax = plt.subplots(figsize=(8, 4))
+    colors = [_RESULT_COLORS.get(n, _POP_PALETTE[i % len(_POP_PALETTE)])
+              for i, n in enumerate(histories.keys())]
+
+    for (name, hist), col in zip(histories.items(), colors):
+        best = np.minimum.accumulate(hist)
+        ax.plot(best, label=name, lw=1.8, color=col)
+
+    ax.set_xlabel("function evaluations")
+    ax.set_ylabel("best loss so far")
+    ax.set_yscale("log")
+    ax.legend(fontsize=9)
+    ax.set_title("Optimizer convergence", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {out_path}")
+
+
+def plot_comparison(results, true_A, true_mu, true_sigma, out_path="comparison.png"):
+    """
+    Absolute error |recovered − true| per parameter, grouped by loss.
+    Directly shows which loss gives better recovery for each parameter.
+    """
+    G           = true_A.shape[0]
+    param_names = ([f"a{i}{j}" for i in range(G) for j in range(G)]
+                   + [f"mu{g}" for g in range(G)] + ["sigma"])
+    true_vals   = ([true_A[i, j] for i in range(G) for j in range(G)]
+                   + list(true_mu) + [true_sigma])
+    loss_names  = list(results.keys())
+
+    n_losses = len(loss_names)
+    x        = np.arange(len(param_names))
+    width    = 0.8 / n_losses
+    colors   = [_RESULT_COLORS.get(n, _POP_PALETTE[i % len(_POP_PALETTE)])
+                for i, n in enumerate(loss_names)]
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    for i, (name, col) in enumerate(zip(loss_names, colors)):
+        errors = [abs(results[name][p] - tv) for p, tv in zip(param_names, true_vals)]
+        offset = (i - n_losses / 2 + 0.5) * width
+        bars = ax.bar(x + offset, errors, width, label=name, color=col,
+                      alpha=0.85, edgecolor="white")
+        for bar, err in zip(bars, errors):
+            if err > 0.005:
+                ax.text(bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 0.002,
+                        f"{err:.3f}", ha="center", va="bottom", fontsize=7,
+                        color=col)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(param_names, fontsize=10)
+    ax.set_ylabel("|recovered − true|")
+    ax.set_title("Parameter recovery error by loss  (lower = better)", fontsize=11)
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {out_path}")
+
+
+def plot_A_heatmap(results, true_A, out_path="A_heatmap.png"):
+    """
+    Side-by-side heatmaps: true A and each recovered A.
+    Annotated with entry values; shared colour scale.
+    """
+    names = ["true"] + list(results.keys())
+    mats  = [true_A] + [res["A"] for res in results.values()]
+    n     = len(names)
+    G     = true_A.shape[0]
+    vmax  = max(np.abs(m).max() for m in mats)
+
+    fig, axes = plt.subplots(1, n, figsize=(3.5 * n, 3.2))
+    if n == 1:
+        axes = [axes]
+
+    im = None
+    for ax, name, mat in zip(axes, names, mats):
+        im = ax.imshow(mat, cmap="RdBu_r", vmin=-vmax, vmax=vmax, aspect="equal")
+        ax.set_xticks(range(G)); ax.set_xticklabels([f"g{j}" for j in range(G)])
+        ax.set_yticks(range(G)); ax.set_yticklabels([f"g{i}" for i in range(G)])
+        for i in range(G):
+            for j in range(G):
+                ax.text(j, i, f"{mat[i, j]:.2f}", ha="center", va="center",
+                        fontsize=9,
+                        color="white" if abs(mat[i, j]) > 0.5 * vmax else "black")
+        title_col = "black"
+        if name in _RESULT_COLORS:
+            title_col = _RESULT_COLORS[name]
+        ax.set_title(name, fontsize=10, color=title_col)
+
+    fig.colorbar(im, ax=axes[-1], label="A entry", shrink=0.85)
+    fig.suptitle("Interaction matrix A: ground truth vs recovered", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {out_path}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -429,72 +599,68 @@ if __name__ == "__main__":
     OUT.mkdir(parents=True, exist_ok=True)
 
     # --- generate simple OU data -------------------------------------------
-    TRUE_A     = np.diag([1.5, 1.2])
-    TRUE_MU    = np.array([3.0, 2.5])
+    TRUE_A     = np.array([[1.5, 0.3, 0.0],
+                           [0.2, 1.2, 0.1],
+                           [0.0, 0.2, 0.9]])
+    TRUE_MU    = np.array([3.0, 2.5, 2.0])
     TRUE_SIGMA = 0.3
     DT         = 0.5
     N_CELLS    = 300
-    SIM_STEPS  = 50       # sub-steps for ground-truth simulation
-    OPT_STEPS  = 10       # sub-steps inside the loss (faster)
+    SIM_STEPS  = 50
+    OPT_STEPS  = 10
+    G          = len(TRUE_MU)
 
     rng = np.random.default_rng(42)
-    X_t0 = rng.multivariate_normal(TRUE_MU * 0.3, 0.1 * np.eye(2), size=N_CELLS)
+    X_t0 = rng.multivariate_normal(TRUE_MU * 0.3, 0.1 * np.eye(G), size=N_CELLS)
     X_t0 = np.maximum(X_t0, 0.05)
     X_t1 = simulate_ou(X_t0, TRUE_A, TRUE_MU, TRUE_SIGMA, DT,
                         n_steps=SIM_STEPS, rng=rng)
 
     snapshots = [X_t0, X_t1]
 
-    # --- line plot (first) ----------------------------------------------------
+    # --- line plot ------------------------------------------------------------
     plot_snapshots_line(snapshots, DT, out_path=OUT / "line_plot.png",
                         true_A=TRUE_A, true_mu=TRUE_MU)
 
-    # --- loss landscape -------------------------------------------------------
-    print("Computing loss landscape (may take ~1 min) ...")
-    plot_loss_landscape(X_t0, X_t1, DT, TRUE_A, TRUE_MU, TRUE_SIGMA,
-                        out_path=OUT / "loss_landscape.png",
-                        n_grid=18, epsilon=0.05)
+    # --- optimise: ou+fp vs ou+fp+cons ---------------------------------------
+    init_theta = encode(np.diag([1.0] * G), np.array([2.0] * G), 0.5)
 
-    # --- optimise combined losses ---------------------------------------------
-    init_theta = encode(
-        np.diag([1.0, 1.0]),
-        np.array([2.0, 2.0]),
-        0.5,
-    )
-
-    LAM = 0.5
     loss_fns = {
-        "ou+fp":              ou_fp_loss_single_step,
-        "ou+fp+cons":         total_loss_single_step,
-        f"ou+fp+{LAM}*cons":  lambda X0, X1, A, mu, sigma, dt, **kw: weighted_loss_single_step(
-                                  X0, X1, A, mu, sigma, dt, lam=LAM, **kw),
+        "ou+fp":      ou_fp_loss_single_step,
+        "ou+fp+cons": total_loss_single_step,
     }
 
-    results = {}
+    results   = {}
+    histories = {}
     for name, fn in loss_fns.items():
         print(f"Optimising [{name}] ...")
-        (A_opt, mu_opt, sigma_opt), res = optimize(
+        (A_opt, mu_opt, sigma_opt), res, hist = optimize(
             fn, X_t0, X_t1, DT, init_theta.copy(),
-            n_steps=OPT_STEPS, epsilon=0.05,
+            n_steps=OPT_STEPS,
         )
         results[name] = {
-            "a0": A_opt[0,0], "a1": A_opt[1,1],
-            "mu0": mu_opt[0], "mu1": mu_opt[1],
+            "A": A_opt,
+            "mu": mu_opt,
             "sigma": sigma_opt,
-            "converged": res.success, "fun": res.fun,
+            **{f"a{i}{j}": A_opt[i, j] for i in range(G) for j in range(G)},
+            **{f"mu{g}": mu_opt[g] for g in range(G)},
         }
+        histories[name] = hist
         print(f"  converged={res.success}  fun={res.fun:.5f}")
         print(f"  A={A_opt.diagonal().round(3)}  mu={mu_opt.round(3)}  sigma={sigma_opt:.3f}")
 
-    print(f"\nTrue: A={TRUE_A.diagonal()}  mu={TRUE_MU}  sigma={TRUE_SIGMA}")
+    print(f"\nTrue A:\n{TRUE_A}")
+    print(f"True mu={TRUE_MU}  sigma={TRUE_SIGMA}")
 
-    # --- phase portrait (after optimisation so recovered means can be overlaid)
-    plot_phase_portrait(snapshots, TRUE_A, TRUE_MU, DT,
-                        out_path=OUT / "phase_portrait.png",
-                        results=results)
-
-    # --- recovery plot --------------------------------------------------------
+    # --- plots ----------------------------------------------------------------
+    plot_convergence(histories, out_path=OUT / "convergence.png")
+    plot_comparison(results, TRUE_A, TRUE_MU, TRUE_SIGMA,
+                    out_path=OUT / "comparison.png")
     plot_recovery(results, TRUE_A, TRUE_MU, TRUE_SIGMA,
                   out_path=OUT / "recovery.png")
+    plot_phase_portrait(snapshots, TRUE_A, TRUE_MU, DT,
+                        out_path=OUT / "phase_portrait.svg",
+                        results=results)
+    plot_A_heatmap(results, TRUE_A, out_path=OUT / "A_heatmap.png")
 
     print(f"\nAll outputs in {OUT.resolve()}")
