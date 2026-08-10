@@ -2,7 +2,7 @@
 Bayesian OU-process parameter recovery from destructive measurement data.
 
 Reads output-destructive-measurements/ (cross-sectional snapshots — each cell
-observed at exactly one timepoint) and recovers A, mu, D via MCMC (PyMC).
+observed at exactly one timepoint) and recovers A, mu, D via MCMC (PyMC).\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 
 Challenge: no cell has a (X_t, X_{t+1}) pair because destructive sequencing
            lyses the cell at measurement time.
