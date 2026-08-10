@@ -6,6 +6,10 @@ KDE(X_t0) (see `_kde_sample` in loss.py, used by `_fp_step`/`_cons_step`).
 For that substitution to be meaningful, the resampled cloud's mean must sit
 close to the true t0 data mean -- and, discriminatively, closer to it than
 to some other, unrelated reference distribution's mean.
+
+"The data described at t0" is a destructive-measurement-style cross-section
+drawn from the datagen stationary simulator (_stationary_destructive_data.py):
+each cell is an independently simulated trajectory observed once.
 """
 from __future__ import annotations
 
@@ -13,15 +17,13 @@ import numpy as np
 
 from multsc_grn_inference.loss import _kde_sample
 
-G = 2
+from _stationary_destructive_data import draw_destructive_t0_cross_section, make_stationary_sim
+
 N_CELLS = 1000
-TRUE_MU = np.array([2.5, 3.0])
 
 
 def _make_data_at_t0(seed: int = 42) -> np.ndarray:
-    rng = np.random.default_rng(seed)
-    X = rng.multivariate_normal(TRUE_MU * 0.4, 0.25 * np.eye(G), size=N_CELLS)
-    return np.maximum(X, 0.05)
+    return draw_destructive_t0_cross_section(make_stationary_sim(seed=seed), N_CELLS)
 
 
 def test_kde_seeded_t0_mean_close_to_described_data_mean():

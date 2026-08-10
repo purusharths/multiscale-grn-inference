@@ -6,6 +6,10 @@ from it. This underlies the FP push-forward (chi_tk -> KDE -> resample ->
 Euler-Maruyama), so it needs to reproduce the source cloud's distribution
 (mean, covariance, requested sample count) closely enough for that
 downstream use to make sense.
+
+The source cloud is a destructive-measurement-style t0 snapshot drawn from
+the datagen stationary simulator (see _stationary_destructive_data.py),
+rather than a hand-rolled synthetic distribution.
 """
 from __future__ import annotations
 
@@ -13,15 +17,14 @@ import numpy as np
 
 from multsc_grn_inference.loss import _kde_sample
 
-G = 2
+from _stationary_destructive_data import draw_destructive_t0_cross_section, make_stationary_sim
+
 N_CELLS = 2000
-TRUE_MU = np.array([2.5, 3.0])
 
 
 def _make_source_cloud(seed: int = 42) -> np.ndarray:
-    rng = np.random.default_rng(seed)
-    X = rng.multivariate_normal(TRUE_MU * 0.4, 0.25 * np.eye(G), size=N_CELLS)
-    return np.maximum(X, 0.05)
+    sim = make_stationary_sim(seed=seed)
+    return draw_destructive_t0_cross_section(sim, N_CELLS)
 
 
 def test_kde_resample_recovers_source_mean():
@@ -41,13 +44,13 @@ def test_kde_resample_returns_requested_sample_count():
     X = _make_source_cloud()
     for n in (1, 50, 3000):
         resampled = _kde_sample(X, n, np.random.default_rng(1))
-        assert resampled.shape == (n, G)
+        assert resampled.shape == (n, X.shape[1])
 
 
 def test_kde_resample_is_clipped_nonnegative():
     # Source cloud hugging zero => some KDE draws would go negative without clipping
     rng = np.random.default_rng(0)
-    X = np.abs(rng.normal(0.02, 0.05, size=(N_CELLS, G)))
+    X = np.abs(rng.normal(0.02, 0.05, size=(N_CELLS, 2)))
     resampled = _kde_sample(X, N_CELLS, np.random.default_rng(1))
     assert np.all(resampled >= 0.0)
 

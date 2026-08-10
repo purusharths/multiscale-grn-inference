@@ -9,6 +9,16 @@ each step rather than tracking the same particles) and recovering (A, mu,
 sigma) with MoM is a check that FP evolution preserves the moment structure
 Euler-Maruyama would have produced directly.
 
+Ground truth (A, mu) and the starting cross-section come from the datagen
+stationary simulator (_stationary_destructive_data.py). The starting
+cross-section uses `draw_perturbed_cross_section` (not a plain t0 draw):
+mom_estimate's mean-velocity regression (step 2) needs the population mean
+to actually move over the snapshot sequence, but the simulator's own t0
+state already sits at mu, which gives a degenerate (near-zero-displacement)
+regression. Starting away from mu and letting the FP evolution relax
+towards mu over the sequence is what the destructive-measurement /
+gene-perturbation datasets in datagen/ model too.
+
 The sequence is run long enough (K * dt >> 1 / diag(A)) for the last
 snapshot to sit near the stationary mean, since MoM uses it as a mu proxy.
 """
@@ -20,19 +30,20 @@ import pytest
 from multsc_grn_inference.loss import _kde_sample, _ou_euler_maruyama
 from multsc_grn_inference.mom_init import mom_estimate
 
-G = 2
+from _stationary_destructive_data import draw_perturbed_cross_section, make_stationary_sim
+
 N_CELLS = 2000
-TRUE_A = np.array([[1.5, 0.0], [0.0, 1.2]])
-TRUE_MU = np.array([2.5, 3.0])
-TRUE_SIGMA = 0.15
 DT = 0.3
 N_SNAPSHOTS = 20  # total horizon = 5.7, several relaxation times
 
+_SIM = make_stationary_sim(seed=42)
+TRUE_A = _SIM.A
+TRUE_MU = _SIM.mu0
+TRUE_SIGMA = 0.15  # scalar, isotropic -- distinct noise model from the sim's per-gene D
+
 
 def _simulate_fp_evolution(seed: int = 42) -> list[np.ndarray]:
-    rng = np.random.default_rng(seed)
-    X0 = rng.multivariate_normal(TRUE_MU * 0.4, 0.25 * np.eye(G), size=N_CELLS)
-    X0 = np.maximum(X0, 0.05)
+    X0 = draw_perturbed_cross_section(make_stationary_sim(seed=seed), N_CELLS, shift=-0.6 * TRUE_MU)
 
     fp_rng = np.random.default_rng(seed + 100)
     snapshots = [X0]
@@ -45,14 +56,14 @@ def _simulate_fp_evolution(seed: int = 42) -> list[np.ndarray]:
 
 
 def test_mom_recovers_mu_from_fp_evolved_snapshots():
-    # recovered equilirium mean. 
+    # recovered equilirium mean.
     snapshots = _simulate_fp_evolution()
     _, mu_hat, _ = mom_estimate(snapshots, DT)
     np.testing.assert_allclose(mu_hat, TRUE_MU, atol=0.05)
 
 
 def test_mom_recovers_sigma_from_fp_evolved_snapshots():
-    # recovery of diffusion strength.the estimated sigma should be close to the true 
+    # recovery of diffusion strength.the estimated sigma should be close to the true
     # sigma (0.15, with 30%  error tolerance)
     snapshots = _simulate_fp_evolution()
     _, _, sigma_hat = mom_estimate(snapshots, DT)
@@ -60,10 +71,10 @@ def test_mom_recovers_sigma_from_fp_evolved_snapshots():
 
 
 def test_mom_recovers_A_diagonal_structure_from_fp_evolved_snapshots():
-    # diagonal entries of A should be positive and close to 1.5,1.2; 
-    # off-diagonal entries should remain small 
-    # because the true system has no gene–gene coupling.
-    
+    # diagonal entries of A should be positive and close to the true diagonal;
+    # off-diagonal entries should remain small
+    # because the true system has no gene-gene coupling.
+
     snapshots = _simulate_fp_evolution()
     A_hat, _, _ = mom_estimate(snapshots, DT)
 

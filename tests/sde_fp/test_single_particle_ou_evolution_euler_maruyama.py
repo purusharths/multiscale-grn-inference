@@ -10,6 +10,10 @@ target by itself, so the long-time / stationary-variance checks use an
 ensemble of independent single-particle replicates (each replicate is one
 particle, evolved on its own -- there is no cross-particle interaction in
 the OU SDE, so this is equivalent to N independent single-particle runs).
+
+Ground truth (A, mu) is sourced from the datagen stationary simulator (see
+_stationary_destructive_data.py); network_density=0.0 there forces a
+diagonal A, which the closed-form checks below need.
 """
 from __future__ import annotations
 
@@ -17,10 +21,13 @@ import numpy as np
 
 from multsc_grn_inference.loss import _ou_euler_maruyama
 
-A_DIAG = np.array([1.5, 1.2])
-TRUE_A = np.diag(A_DIAG)
-TRUE_MU = np.array([2.5, 3.0])
-TRUE_SIGMA = 0.15
+from _stationary_destructive_data import make_stationary_sim
+
+_SIM = make_stationary_sim(seed=42)
+A_DIAG = np.diag(_SIM.A)
+TRUE_A = _SIM.A
+TRUE_MU = _SIM.mu0
+TRUE_SIGMA = 0.15  # scalar, isotropic -- distinct noise model from the sim's per-gene D
 
 
 def test_single_particle_noise_free_trajectory_matches_analytic_decay():
