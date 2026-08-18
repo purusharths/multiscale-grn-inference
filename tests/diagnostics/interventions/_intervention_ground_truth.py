@@ -20,6 +20,8 @@ time-varying here, unlike the stationary case where every entry is equal.
 """
 from __future__ import annotations
 
+import copy
+
 import numpy as np
 
 from multsc_grn_inference.datagen.non_stationary_sim import NetworkSimulatorNonStationaryMu
@@ -47,6 +49,52 @@ def make_constant_sim(num_genes: int = 4, seed: int = 42):
     return NetworkSimulatorNonStationaryMu(
         num_genes=num_genes, network_density=0.0, seed=seed, mu_mode="constant",
     )
+
+
+def make_single_gene_knockout_sim(
+    num_genes: int = 5,
+    knockout_gene: int = 0,
+    seed: int = 42,
+    t_star: float = 2.0,
+    k: float = 20.0,
+    network_density: float = 0.3,
+):
+    """
+    Knock out ONE gene, on a network with off-diagonal coupling.
+
+    mu_inverse_sigmoid already takes a per-gene `delta`, so a one-hot delta
+    (delta[j] = mu0[j], zero elsewhere) drives only gene j's target to zero
+    and leaves every other gene's target at baseline -- no new mu_mode
+    needed. delta depends on mu0, which only exists after construction, so
+    mu_kwargs is filled in afterwards (mu_t reads self.mu_kwargs at call
+    time, so this takes effect).
+
+    network_density > 0 gives A off-diagonal entries, which is what lets the
+    knockout PROPAGATE: gene i's drift is sum_j A[i,j](mu_j - c_j), so while
+    gene j is displaced from its target the other genes feel it. Use
+    make_uncoupled_twin() for the diagonal-A control that isolates this.
+    """
+    sim = NetworkSimulatorNonStationaryMu(
+        num_genes=num_genes, network_density=network_density, seed=seed,
+        mu_mode="knockout",
+    )
+    delta = np.zeros(num_genes)
+    delta[knockout_gene] = sim.mu0[knockout_gene]
+    sim.mu_kwargs = {"delta": delta, "t_star": t_star, "k": k}
+    return sim
+
+
+def make_uncoupled_twin(sim):
+    """
+    Deep copy of `sim` with A's off-diagonal entries zeroed -- identical
+    mu0, D, diagonal(A), mu_kwargs AND rng state, so a paired run differs
+    from the original in exactly one respect: the presence of gene-gene
+    coupling. Any difference in the non-knocked-out genes between the two
+    is therefore attributable to propagation through the network.
+    """
+    twin = copy.deepcopy(sim)
+    twin.A = np.diag(np.diag(sim.A)).copy()
+    return twin
 
 
 def extract_snapshots(
