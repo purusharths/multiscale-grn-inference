@@ -23,13 +23,13 @@ from multsc_grn_inference.datagen.run_destructive_measurements import (
     POPULATIONS,
     NetworkSimulatorPerGeneMu,
 )
-from multsc_grn_inference.multi_step_ou_loss_check import (
+from archive.multi_step_ou_loss_check import (
+    encode,
     ou_fp_loss,
     optimize,
     total_loss,
 )
-from multsc_grn_inference.simple_ou_loss_check import (
-    encode,
+from multsc_grn_inference.housekeeping.ou_check_plots import (
     plot_A_heatmap,
     plot_comparison,
     plot_convergence,

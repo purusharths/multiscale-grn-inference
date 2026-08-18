@@ -1,69 +1,95 @@
 """
 Multi-timestep OU loss check.
 
-Reuses primitives from simple_ou_loss_check.py.
-Losses sum over all consecutive snapshot pairs [t0,t1], [t1,t2], ...
+Loss functions are loss.py's ou_fp_loss / total_loss (sum over all
+consecutive snapshot pairs, sliced-W2 on KDE-resampled clouds) -- the same
+implementation covered by tests/loss/ and tests/sde_fp/. This script adds
+a `weighted_loss` (lam-weighted consistency term, no equivalent in loss.py)
+and a Nelder-Mead `optimize()` wrapper around all of them, plus diagnostic
+plots (housekeeping/ou_check_plots.py) and a loss-landscape sweep.
 
 Usage:
     uv run python -m multsc_grn_inference.multi_step_ou_loss_check
 """
-from __future__ import annotations  
+from __future__ import annotations
 
 import numpy as np
 import scipy.optimize
 import matplotlib.pyplot as plt
 
-from multsc_grn_inference.simple_ou_loss_check import (
-    simulate_ou,
-    ou_fp_loss_single_step,
-    total_loss_single_step,
-    weighted_loss_single_step,
-    encode,
-    decode,
-    plot_snapshots_line,
+from multsc_grn_inference.loss import (
+    _ou_euler_maruyama,
+    consistency_loss,
+    fp_loss,
+    ou_loss,
+)
+from multsc_grn_inference.loss import ou_fp_loss as _ou_fp_loss
+from multsc_grn_inference.loss import total_loss as _total_loss
+from multsc_grn_inference.housekeeping.ou_check_plots import (
+    _ARROW_COLOR,
+    plot_A_heatmap,
+    plot_comparison,
+    plot_convergence,
     plot_phase_portrait,
     plot_recovery,
-    plot_convergence,
-    plot_comparison,
-    plot_A_heatmap,
-    _ARROW_COLOR,
+    plot_snapshots_line,
 )
 
 
 # ---------------------------------------------------------------------------
-# Multi-step losses  (sum over all K-1 consecutive intervals)
+# Parameter (en/de)coding: theta = [log_a0,...,log_aG (diag), off-diag
+# row-major, mu0,...,muG, log_sigma]
 # ---------------------------------------------------------------------------
 
-def ou_fp_loss(snapshots, A, mu, sigma, dt, n_steps=1, seed=0, dist_fn=None):
-    """L_OU + L_FP summed over all intervals."""
-    return sum(
-        ou_fp_loss_single_step(
-            snapshots[k], snapshots[k + 1], A, mu, sigma, dt,
-            n_steps=n_steps, seed=seed + k, dist_fn=dist_fn,
-        )
-        for k in range(len(snapshots) - 1)
-    )
+def encode(A, mu, sigma):
+    """theta = [log_a00,...,log_aGG (diag), off-diag row-major, mu0,...,muG, log_sigma]."""
+    G = len(mu)
+    log_diag = [np.log(A[g, g]) for g in range(G)]
+    off_diag = [A[i, j] for i in range(G) for j in range(G) if i != j]
+    return np.array(log_diag + off_diag + list(mu) + [np.log(sigma)])
 
 
-def total_loss(snapshots, A, mu, sigma, dt, n_steps=1, seed=0, dist_fn=None):
-    """L_OU + L_FP + L_cons summed over all intervals."""
-    return sum(
-        total_loss_single_step(
-            snapshots[k], snapshots[k + 1], A, mu, sigma, dt,
-            n_steps=n_steps, seed=seed + k, dist_fn=dist_fn,
-        )
-        for k in range(len(snapshots) - 1)
-    )
+def decode(theta):
+    """Inverse of encode. Infers G from len(theta) = G**2 + G + 1."""
+    n = len(theta)
+    G = int(round((-1 + np.sqrt(1 + 4 * (n - 1))) / 2))
+    A = np.zeros((G, G))
+    for g in range(G):
+        A[g, g] = np.exp(theta[g])
+    off_idx = G
+    for i in range(G):
+        for j in range(G):
+            if i != j:
+                A[i, j] = theta[off_idx]
+                off_idx += 1
+    mu    = np.array(theta[G * G: G * G + G])
+    sigma = float(np.exp(theta[-1]))
+    return A, mu, sigma
 
 
-def weighted_loss(snapshots, A, mu, sigma, dt, n_steps=1, seed=0, dist_fn=None, lam=0.5):
+# ---------------------------------------------------------------------------
+# Multi-step losses (sum over all K-1 consecutive intervals) -- thin
+# wrappers over loss.py, matching this script's (n_steps) call signature to
+# loss.py's (n_substeps, n_proj)
+# ---------------------------------------------------------------------------
+
+def ou_fp_loss(snapshots, A, mu, sigma, dt, n_steps=1, seed=0, n_proj=100):
+    """L_OU + L_FP summed over all intervals (loss.py implementation)."""
+    return _ou_fp_loss(snapshots, A, mu, sigma, dt, n_substeps=n_steps, n_proj=n_proj, seed=seed)
+
+
+def total_loss(snapshots, A, mu, sigma, dt, n_steps=1, seed=0, n_proj=100):
+    """L_OU + L_FP + L_cons summed over all intervals (loss.py implementation)."""
+    return _total_loss(snapshots, A, mu, sigma, dt, n_substeps=n_steps, n_proj=n_proj, seed=seed)
+
+
+def weighted_loss(snapshots, A, mu, sigma, dt, n_steps=1, seed=0, n_proj=100, lam=0.5):
     """L_OU + L_FP + lam * L_cons summed over all intervals."""
-    return sum(
-        weighted_loss_single_step(
-            snapshots[k], snapshots[k + 1], A, mu, sigma, dt,
-            n_steps=n_steps, seed=seed + k, dist_fn=dist_fn, lam=lam,
-        )
-        for k in range(len(snapshots) - 1)
+    kw = dict(n_substeps=n_steps, n_proj=n_proj, seed=seed)
+    return (
+        ou_loss(snapshots, A, mu, sigma, dt, **kw)
+        + fp_loss(snapshots, A, mu, sigma, dt, **kw)
+        + lam * consistency_loss(snapshots, A, mu, sigma, dt, **kw)
     )
 
 
@@ -71,13 +97,10 @@ def weighted_loss(snapshots, A, mu, sigma, dt, n_steps=1, seed=0, dist_fn=None, 
 # Optimizer for multi-step losses
 # ---------------------------------------------------------------------------
 
-def optimize(loss_fn, snapshots, dt, init_theta, n_steps=50, seed=0, dist_fn=None):
+def optimize(loss_fn, snapshots, dt, init_theta, n_steps=50, seed=0, n_proj=100):
     """
     Minimize loss_fn(snapshots, A, mu, sigma, dt, ...) over
-    θ = [log_a0, log_a1, mu0, mu1, log_sigma] via Nelder-Mead.
-
-    dist_fn : distance function (X, Y) -> float
-              default = sliced_w2 (fast); pass w2 for Sinkhorn accuracy.
+    theta = [log_a0, log_a1, mu0, mu1, log_sigma] via Nelder-Mead.
 
     Returns
     -------
@@ -89,7 +112,7 @@ def optimize(loss_fn, snapshots, dt, init_theta, n_steps=50, seed=0, dist_fn=Non
     def objective(theta):
         A, mu, sigma = decode(theta)
         val = loss_fn(snapshots, A, mu, sigma, dt,
-                      n_steps=n_steps, seed=seed, dist_fn=dist_fn)
+                      n_steps=n_steps, seed=seed, n_proj=n_proj)
         history.append(val)
         return val
 
@@ -106,7 +129,7 @@ def optimize(loss_fn, snapshots, dt, init_theta, n_steps=50, seed=0, dist_fn=Non
 
 def plot_loss_landscape(snapshots, dt, true_A, true_mu, true_sigma,
                         out_path="loss_landscape.png",
-                        n_grid=20, epsilon=0.01, seed=0, lam=0.5):
+                        n_grid=20, seed=0, lam=0.5):
     """
     2D loss heatmap over a0 × mu0 for the three combined multi-step losses.
     All other parameters held at their true values.
@@ -207,8 +230,8 @@ if __name__ == "__main__":
 
     snapshots = [X.copy()]
     for _ in range(N_SNAPS - 1):
-        X = simulate_ou(X, TRUE_A, TRUE_MU, TRUE_SIGMA, DT,
-                        n_steps=SIM_STEPS, rng=rng)
+        X = _ou_euler_maruyama(X, TRUE_A, TRUE_MU, TRUE_SIGMA, DT,
+                               n_substeps=SIM_STEPS, rng=rng)
         snapshots.append(X.copy())
 
     times = [k * DT for k in range(N_SNAPS)]

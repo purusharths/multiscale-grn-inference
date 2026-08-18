@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from multsc_grn_inference.datagen.non_stationary_sim import NetworkSimulatorNonStationaryMu
-from multsc_grn_inference.visualizer import plot_cell_trajectories, plot_clustermap, plot_dynamics, plot_embeddings, plot_expression_matrix, plot_expression_snapshots
+from multsc_grn_inference.housekeeping.visualizer import plot_cell_trajectories, plot_clustermap, plot_dynamics, plot_embeddings, plot_expression_matrix, plot_expression_snapshots
 
 
 def _sim_to_dataframes(

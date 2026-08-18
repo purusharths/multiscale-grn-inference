@@ -32,7 +32,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from multsc_grn_inference.loss_diagnostic import (
+from archive.loss_diagnostic import (
     LOSS_FNS,
     LOSS_ORDER,
     N_CELLS,

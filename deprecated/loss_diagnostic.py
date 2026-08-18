@@ -45,7 +45,7 @@ import pandas as pd
 import scipy.optimize
 
 from multsc_grn_inference.datagen.non_stationary_sim import NetworkSimulatorNonStationaryMu
-from multsc_grn_inference.loss import (
+from archive.loss import (
     consistency_loss,
     fp_loss,
     ou_fp_loss,
