@@ -1,7 +1,13 @@
 import numpy as np
 
 from ..housekeeping.enforce_diagonal_dominance import enforce_diagonal_dominance
-from ..housekeeping.mu_options import mu_constant, mu_heaviside, mu_linear, mu_sigmoid
+from ..housekeeping.mu_options import (
+    mu_constant,
+    mu_heaviside,
+    mu_inverse_sigmoid,
+    mu_linear,
+    mu_sigmoid,
+)
 
 
 class NetworkSimulatorNonStationaryMu:
@@ -60,13 +66,17 @@ class NetworkSimulatorNonStationaryMu:
         elif mode == "sigmoid":
             return mu_sigmoid(self.mu0, t, T, **kw)
 
+        elif mode in ("inverse_sigmoid", "knockout"):
+            return mu_inverse_sigmoid(self.mu0, t, T, **kw)
+
         elif mode in ("heaviside", "piecewise"):
             return mu_heaviside(self.mu0, t, T, **kw)
 
         else:
             raise ValueError(
                 f"Unknown mu_mode '{mode}'. "
-                "Choose from: 'constant', 'linear', 'sigmoid', 'heaviside', 'piecewise'."
+                "Choose from: 'constant', 'linear', 'sigmoid', 'inverse_sigmoid', "
+                "'knockout', 'heaviside', 'piecewise'."
             )
         
     

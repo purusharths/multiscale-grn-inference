@@ -42,6 +42,28 @@ def mu_sigmoid(
 
 
 
+# inverse sigmoid (knockout)   mu(t) = mu0 - delta * σ(k*(t - t_star))
+# Mirror image of mu_sigmoid: models an intervention that *suppresses* the
+# expression target after t_star rather than raising it.  Unlike mu_sigmoid,
+# delta defaults to mu0 itself, so the default is a full knockout driving the
+# target mu0 -> ~0 (a partial knockdown is delta < mu0).
+def mu_inverse_sigmoid(
+    mu0: np.ndarray,
+    t: float,
+    T: float,
+    delta: np.ndarray | None = None,
+    t_star: float | None = None,
+    k: float = 20.0,
+    **kwargs,
+) -> np.ndarray:
+    if delta is None:
+        delta = mu0.copy()
+    if t_star is None:
+        t_star = T / 2.0
+    h = 1.0 / (1.0 + np.exp(-k * (t - t_star)))
+    return mu0 - delta * h
+
+
 # heaviside mu(t) = mu0 + delta * H(t - t_star)
 # piecewise mu(t) = mu0 + delta * (t >= t_star)
 def mu_heaviside(
