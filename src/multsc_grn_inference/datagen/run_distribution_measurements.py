@@ -32,7 +32,7 @@ from multsc_grn_inference.housekeeping.mu_options import (
     mu_linear,
     mu_sigmoid,
 )
-from multsc_grn_inference.visualizer import (
+from multsc_grn_inference.housekeeping.visualizer import (
     plot_clustermap,
     plot_dynamics_snapshot,
     plot_embeddings,
