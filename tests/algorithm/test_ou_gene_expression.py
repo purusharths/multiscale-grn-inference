@@ -8,7 +8,7 @@ Spec for Algorithm 1's OUGeneExpression (paper lines 20-28):
             Integrate SDE forward to t_{k+1}
         return {c_j(t_{k+1})}_{j=1}^N
 
-TDD red phase: multsc_grn_inference.ou_gene_expression.ou_gene_expression
+TDD red phase: multsc_grn_inference.algorithm.ou_gene_expression.ou_gene_expression
 currently raises NotImplementedError. These tests describe the behaviour
 it must satisfy, using a diagonal A (closed-form OU solution) sourced from
 the datagen stationary simulator (see _ground_truth.py).
@@ -89,7 +89,7 @@ def test_uses_mu_at_k_not_a_fixed_interval():
     must select mu_at(k) for the interval being integrated, not e.g. always mu[0]."""
     n_cells = 3000
     X0 = np.tile(np.array([0.0, 0.0]), (n_cells, 1))
-    dt = 3.0  # several relaxation times, noise-free so mean == deterministic target
+    dt = 5.0  # several relaxation times, noise-free so mean == deterministic target
     mu_0 = np.array([1.0, 1.0])
     mu_1 = np.array([5.0, 5.0])
     theta = Theta(A=TRUE_A, mu=[mu_0, mu_1], sigma=0.0)

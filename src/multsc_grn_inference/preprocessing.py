@@ -21,4 +21,4 @@ from scipy.stats import gaussian_kde
 
 def preprocessing(X_tk: np.ndarray) -> gaussian_kde:
     """chi_tk <- KDE(X_tk). X_tk: (N, G) cross-sectional snapshot."""
-    raise NotImplementedError
+    return gaussian_kde(X_tk.T)

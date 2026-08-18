@@ -51,15 +51,24 @@ def make_snapshots(
     *,
     n_substeps: int = 5,
     seed: int = 0,
+    shift: np.ndarray | None = None,
 ) -> list[np.ndarray]:
     """
     Track the SAME n_cells particles forward n_snapshots-1 intervals under
     sim's own (A, mu0, sigma=sqrt(mean(diag(D)))) -- a same-cell-tracked
     sequence, matching OUGeneExpression's contract (paper lines 23-24:
     c_j(t_k) initialised from observed cell j).
+
+    shift : the simulator always initialises cells at mu + small noise
+        (near equilibrium), which gives near-zero drift regardless of A --
+        useless for telling true vs. wrong dynamics apart. Pass e.g.
+        shift=-0.6*mu0 to start the population away from mu, mimicking a
+        freshly-perturbed (not-yet-relaxed) population instead.
     """
     rng = np.random.default_rng(seed)
     X = draw_cross_section(sim, n_cells)
+    if shift is not None:
+        X = np.maximum(X + shift, 0.05)
     sigma = float(np.sqrt(np.diag(sim.D).mean()))
     snaps = [X]
     for _ in range(n_snapshots - 1):

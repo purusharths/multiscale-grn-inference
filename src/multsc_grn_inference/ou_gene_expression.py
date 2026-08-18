@@ -35,4 +35,17 @@ def ou_gene_expression(
     X_tk : (N, G) cells observed at t_k, used as initial condition c_j(t_k)
     k    : interval index -- selects theta.mu_at(k) as the drift target mu_k
     """
-    raise NotImplementedError
+    if rng is None:
+        rng = np.random.default_rng()
+
+    mu_k = theta.mu_at(k)
+    c = X_tk.copy()
+    sub_dt = dt / n_substeps
+    sqrt_sub_dt = np.sqrt(sub_dt)
+
+    for _ in range(n_substeps):
+        drift = (mu_k - c) @ theta.A.T
+        noise = theta.sigma * sqrt_sub_dt * rng.standard_normal(c.shape)
+        c = np.maximum(c + drift * sub_dt + noise, 0.0)
+
+    return c
