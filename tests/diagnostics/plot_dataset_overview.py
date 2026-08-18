@@ -6,17 +6,17 @@ usage). One figure, two subplots: UMAP embedding + SDE phase plot
 (gene_0 vs gene_1, since the test dataset is 2-gene).
 
 Not a test -- a standalone script. Re-run anytime; always overwrites
-tests/dataset_overview.png.
+tests/diagnostics/dataset_overview.png.
 
 Usage:
-    uv run python tests/plot_dataset_overview.py
+    uv run python tests/diagnostics/plot_dataset_overview.py
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent / "algorithm"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "algorithm"))
 
 import matplotlib.pyplot as plt
 import numpy as np
