@@ -1,6 +1,6 @@
 """
 Does JKOnet* recover the single-gene-knockout network as well as this repo's
-OU+Cons fit -- and how much of any gap is just JKOnet* not knowing {mu_k}?
+Algorithm 1 -- and how much of any gap is just JKOnet* not knowing {mu_k}?
 See README.md for the full design rationale and caveats.
 
 Dataset: the same coupled single-gene-knockout scenario as
@@ -12,11 +12,15 @@ off-diagonal edges), run twice:
     effectively constant) -- isolates "can JKOnet* fit a static potential at
     all" from "can it handle the regime switch".
 
-Our side: OU+Cons fit (full A via log-diag + free off-diagonals, sigma;
-mu fixed at the known {mu_k} -- same parametrization as
-compare_losses_single_gene_knockout.py). OU+Cons had the best edge_corr in
-that script's sweep (loss_comparison_knockout.csv), so it stands in for
-"the current implementation" here rather than re-running the whole sweep.
+Our side: all 6 loss combinations from
+../interventions/_ours_combinations.py (== that script's sweep, Cons-alone
+excluded as degenerate there). An earlier version of this script picked a
+single "best" combination (OU+Cons) to stand in for "the current
+implementation" -- see _ours_combinations.py's docstring for why that
+was weaker than it looked (every combination's A_err/offdiag_err in the
+prior sweep was nearly identical; edge_corr was the only thing that moved,
+across a single noisy run per combination). Comparing all six avoids
+leaning on that noise.
 
 JKOnet* side, two solvers by default (see README.md for why these two, and
 why jkonet-star-linear-potential-internal -- the only variant whose fit
@@ -48,19 +52,26 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import scipy.optimize
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "interventions"))
 
-from multsc_grn_inference.compute_loss import _sliced_w2, loss_cons, loss_ou
-from multsc_grn_inference.ou_gene_expression import ou_gene_expression
-from multsc_grn_inference.preprocessing import preprocessing
-from multsc_grn_inference.theta import Theta
+from multsc_grn_inference.compute_loss import _sliced_w2
+from multsc_grn_inference.housekeeping.edge_recovery_metrics import (
+    auprc,
+    auroc,
+    precision_at_k,
+)
 
 from _intervention_ground_truth import (  # noqa: E402
     effective_sigma,
     extract_snapshots,
     make_single_gene_knockout_sim,
+)
+from _ours_combinations import (  # noqa: E402
+    COMBINATIONS,
+    fit_combination,
+    off_diag_indices,
+    one_step_ahead_w2,
 )
 
 # ---------------------------------------------------------------------------
@@ -134,56 +145,20 @@ def build_scenario(t_star: float | None):
     return sim, snapshots, eval_snapshots, mu_known, dt
 
 
-# ---------------------------------------------------------------------------
-# Our fit: OU+Cons, full A + sigma, mu fixed at known {mu_k}
-# (same parametrization as compare_losses_single_gene_knockout.py)
-# ---------------------------------------------------------------------------
-
-OFF = [(i, j) for i in range(N_GENES) for j in range(N_GENES) if i != j]
+OFF = off_diag_indices(N_GENES)
 
 
-def encode(A: np.ndarray, sigma: float) -> np.ndarray:
-    return np.concatenate([np.log(np.diag(A)), [A[i, j] for i, j in OFF], [np.log(sigma)]])
-
-
-def decode(x: np.ndarray, mu_known) -> Theta:
-    A = np.diag(np.exp(x[:N_GENES]))
-    for n, (i, j) in enumerate(OFF):
-        A[i, j] = x[N_GENES + n]
-    return Theta(A=A, mu=mu_known, sigma=float(np.exp(x[-1])))
-
-
-def fit_ou_cons(snapshots, mu_known, dt) -> tuple[Theta, dict]:
-    chi = [preprocessing(X) for X in snapshots]
-
-    def objective(x):
-        theta = decode(x, mu_known)
-        return (
-            loss_ou(theta, snapshots, chi, dt, n_proj=N_PROJ, seed=0)
-            + loss_cons(theta, snapshots, chi, dt, n_proj=N_PROJ, seed=0)
-        )
-
-    x0 = encode(np.eye(N_GENES) * 1.2, 0.5)
-    t0 = time.perf_counter()
-    res = scipy.optimize.minimize(
-        objective, x0, method=OPTIMIZER_METHOD,
-        options={"maxiter": MAXITER, "xatol": 1e-3, "fatol": 1e-6, "adaptive": True},
-    )
-    elapsed = time.perf_counter() - t0
-    return decode(res.x, mu_known), {"n_evals": res.nfev, "seconds": round(elapsed, 1), "final_objective": res.fun}
-
-
-def one_step_ahead_w2_ours(theta_hat: Theta, eval_snapshots, dt) -> float:
-    """Roll the (held-out) eval snapshot at t_k one interval forward under
-    theta_hat, sliced-W2 against the eval snapshot at t_{k+1} -- mirrors
-    JKOnet*'s error_wasserstein_one_step_ahead, but scored on the same
-    independent eval set as the JKOnet* side (see build_scenario())."""
-    rng = np.random.default_rng(0)
-    errs = []
-    for k in range(len(eval_snapshots) - 1):
-        pred = ou_gene_expression(eval_snapshots[k], theta_hat, k, dt, rng=rng)
-        errs.append(_sliced_w2(pred, eval_snapshots[k + 1], N_PROJ, rng))
-    return float(np.mean(errs))
+def _edge_metrics(true_off: np.ndarray, hat_off: np.ndarray) -> dict:
+    """edge_corr plus AUPRC/AUROC/precision@k -- see
+    src/multsc_grn_inference/housekeeping/edge_recovery_metrics.py for why
+    the latter three are the more trustworthy read on edge recovery."""
+    k = int((true_off != 0).sum())
+    return {
+        "edge_corr": float(np.corrcoef(true_off, hat_off)[0, 1]) if hat_off.std() > 1e-12 else 0.0,
+        "auprc": auprc(true_off, hat_off),
+        "auroc": auroc(true_off, hat_off),
+        "precision_at_k": precision_at_k(true_off, hat_off, k),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -255,28 +230,35 @@ def main() -> None:
     _require_jko_setup()
     rows = []
     A_hats: dict[str, np.ndarray] = {}
+    A_trues: dict[str, np.ndarray] = {}
 
     for scenario_name, t_star in [("knockout", T_STAR), ("control", None)]:
         print(f"\n=== scenario: {scenario_name} ===", flush=True)
         sim, snapshots, eval_snapshots, mu_known, dt = build_scenario(t_star)
         A_true = sim.A
+        A_trues[scenario_name] = A_true
         true_off = np.array([A_true[i, j] for i, j in OFF])
 
-        print("[ours: OU+Cons] fitting ...", flush=True)
-        theta_hat, fit_info = fit_ou_cons(snapshots, mu_known, dt)
-        hat_off = np.array([theta_hat.A[i, j] for i, j in OFF])
-        w2_ours = one_step_ahead_w2_ours(theta_hat, eval_snapshots, dt)
-        rows.append({
-            "scenario": scenario_name, "method": "ours (OU+Cons)",
-            "one_step_w2": w2_ours,
-            "A_err": float(np.linalg.norm(theta_hat.A - A_true)),
-            "offdiag_err": float(np.linalg.norm(hat_off - true_off)),
-            "edge_corr": float(np.corrcoef(true_off, hat_off)[0, 1]) if hat_off.std() > 1e-12 else 0.0,
-            "sigma_err": abs(theta_hat.sigma - effective_sigma(sim)),
-            **fit_info,
-        })
-        A_hats[f"{scenario_name}__ours"] = theta_hat.A
-        print(f"  w2={w2_ours:.4f}  A_err={rows[-1]['A_err']:.3f}  edge_corr={rows[-1]['edge_corr']:+.3f}")
+        for combo_name, terms in COMBINATIONS.items():
+            print(f"[ours: {combo_name}] fitting ...", flush=True)
+            theta_hat, fit_info = fit_combination(
+                terms, snapshots, mu_known, dt, N_GENES,
+                n_proj=N_PROJ, maxiter=MAXITER, method=OPTIMIZER_METHOD, seed=0,
+            )
+            hat_off = np.array([theta_hat.A[i, j] for i, j in OFF])
+            w2_ours = one_step_ahead_w2(theta_hat, eval_snapshots, dt, n_proj=N_PROJ, seed=0)
+            rows.append({
+                "scenario": scenario_name, "method": f"ours ({combo_name})",
+                "one_step_w2": w2_ours,
+                "A_err": float(np.linalg.norm(theta_hat.A - A_true)),
+                "offdiag_err": float(np.linalg.norm(hat_off - true_off)),
+                **_edge_metrics(true_off, hat_off),
+                "sigma_err": abs(theta_hat.sigma - effective_sigma(sim)),
+                **fit_info,
+            })
+            A_hats[f"{scenario_name}__ours_{combo_name}"] = theta_hat.A
+            print(f"  w2={w2_ours:.4f}  A_err={rows[-1]['A_err']:.3f}  "
+                  f"edge_corr={rows[-1]['edge_corr']:+.3f}  auprc={rows[-1]['auprc']:.3f}")
 
         dataset_name = f"single_gene_knockout_{scenario_name}"
         write_jko_dataset(dataset_name, snapshots, eval_snapshots)
@@ -300,9 +282,7 @@ def main() -> None:
                 hat_off = np.array([A_hat[i, j] for i, j in OFF])
                 row["A_err"] = float(np.linalg.norm(A_hat - A_true))
                 row["offdiag_err"] = float(np.linalg.norm(hat_off - true_off))
-                row["edge_corr"] = (
-                    float(np.corrcoef(true_off, hat_off)[0, 1]) if hat_off.std() > 1e-12 else 0.0
-                )
+                row.update(_edge_metrics(true_off, hat_off))
                 A_hats[f"{scenario_name}__{solver}"] = A_hat
             rows.append(row)
             print(f"  w2={w2_jko:.4f}  {elapsed:.0f}s")
@@ -314,11 +294,13 @@ def main() -> None:
     print(df.to_string(index=False))
 
     _plot(df, A_hats)
+    _plot_matrices(A_trues, A_hats)
 
 
 def _plot(df: pd.DataFrame, A_hats: dict[str, np.ndarray]) -> None:
     scenarios = df["scenario"].unique()
-    fig, axes = plt.subplots(1, len(scenarios), figsize=(6 * len(scenarios), 5))
+    n_rows = df.groupby("scenario").size().max()
+    fig, axes = plt.subplots(1, len(scenarios), figsize=(7 * len(scenarios), 0.5 * n_rows + 1.5))
     axes = np.atleast_1d(axes)
     for ax, scenario in zip(axes, scenarios):
         sub = df[df["scenario"] == scenario]
@@ -327,11 +309,55 @@ def _plot(df: pd.DataFrame, A_hats: dict[str, np.ndarray]) -> None:
         ax.set_title(f"{scenario}: one-step-ahead sliced-W2 (lower better)", fontsize=9)
         ax.tick_params(labelsize=8)
     fig.suptitle(
-        f"Ours (knows {{mu_k}}) vs JKOnet* (doesn't) -- single-gene knockout, "
-        f"{N_GENES} genes, density={NETWORK_DENSITY}"
+        f"Ours -- all 6 loss combinations (knows {{mu_k}}) vs JKOnet* (doesn't) -- "
+        f"single-gene knockout, {N_GENES} genes, density={NETWORK_DENSITY}"
     )
     fig.tight_layout()
     png_path = HERE / "jko_comparison.png"
+    fig.savefig(png_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {png_path}")
+
+
+def _plot_matrices(A_trues: dict[str, np.ndarray], A_hats: dict[str, np.ndarray]) -> None:
+    """TRUE A vs every recovered A_hat (all 6 "ours" combinations, plus any
+    JKOnet* linear-solver A_hat if that solver was included), one row per
+    scenario, shared per-scenario color scale."""
+    scenarios = list(A_trues.keys())
+    combo_names = list(COMBINATIONS.keys())
+    extra_labels = sorted({
+        key.split("__", 1)[1] for key in A_hats
+        if not key.split("__", 1)[1].startswith("ours_")
+    })
+    panel_labels = ["TRUE A"] + [f"ours ({c})" for c in combo_names] + extra_labels
+    n_cols = len(panel_labels)
+
+    fig, axes = plt.subplots(len(scenarios), n_cols, figsize=(2.0 * n_cols, 2.2 * len(scenarios) + 0.5))
+    axes = np.atleast_2d(axes)
+
+    im = None
+    for row, scenario in enumerate(scenarios):
+        A_true = A_trues[scenario]
+        vmax = np.abs(A_true).max() * 1.2
+        for col, label in enumerate(panel_labels):
+            ax = axes[row, col]
+            if label == "TRUE A":
+                mat = A_true
+            elif label.startswith("ours ("):
+                mat = A_hats[f"{scenario}__ours_{label[len('ours ('):-1]}"]
+            else:
+                mat = A_hats[f"{scenario}__{label}"]
+            im = ax.imshow(mat, cmap="RdBu_r", vmin=-vmax, vmax=vmax)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            if row == 0:
+                ax.set_title(label, fontsize=8, fontweight="bold" if label == "TRUE A" else "normal")
+            if col == 0:
+                ax.set_ylabel(scenario, fontsize=9)
+
+    fig.suptitle(f"Recovered A -- {N_GENES} genes, density={NETWORK_DENSITY}", fontsize=11)
+    fig.colorbar(im, ax=axes, shrink=0.6, label="A_ij", pad=0.01)
+    png_path = HERE / "jko_recovered_matrices.png"
     fig.savefig(png_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved: {png_path}")

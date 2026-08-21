@@ -28,6 +28,14 @@ not just "which method fits better". `compare_jkonet_star.py` runs both the
 knockout dataset and the constant-mu control (`make_constant_sim`) to
 separate that from raw fitting quality.
 
+"Ours" is all 6 loss combinations from `../interventions/_ours_combinations.py`
+(OU, FP, OU+FP, OU+Cons, FP+Cons, OU+FP+Cons — same set as
+`../interventions/single-gene-knockout/loss-combinations/compare_losses_single_gene_knockout.py`'s
+sweep, Cons-alone excluded there as degenerate), not a single picked
+combination — see `_ours_combinations.py`'s docstring for why picking one
+"best" combination from a single past sweep would have been leaning on
+noise rather than a real ranking.
+
 The knockout's mu(t) is a regime switch at `t_star`, which a *static*
 potential can't represent. `jkonet-star-time-potential` (potential takes
 time as an extra feature) is the structural match; the plain
@@ -89,8 +97,9 @@ Wasserstein approximations.
   venv). Builds the knockout + constant-mu datasets, converts snapshots to
   JKOnet*'s `data.npy`/`sample_labels.npy` format, shells out to
   `data_generator.py` (their coupling/density preprocessing) and
-  `_jko_star_driver.py`, fits our own OU+Cons model on the identical
-  snapshots, and produces `jko_comparison.{csv,png}`.
+  `_jko_star_driver.py`, fits all 6 of our loss combinations on the
+  identical snapshots (`../interventions/_ours_combinations.py`), and
+  produces `jko_comparison.{csv,png}`.
 
 Usage:
 
