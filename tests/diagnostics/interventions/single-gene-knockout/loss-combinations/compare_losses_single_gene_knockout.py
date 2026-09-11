@@ -38,7 +38,6 @@ Usage:
 from __future__ import annotations
 
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -46,16 +45,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import scipy.optimize
-
-from multsc_grn_inference.compute_loss import loss_cons, loss_fp, loss_ou
-from multsc_grn_inference.preprocessing import preprocessing
-from multsc_grn_inference.theta import Theta
 
 from _intervention_ground_truth import (
     effective_sigma,
     extract_snapshots,
     make_single_gene_knockout_sim,
+)
+from _ours_combinations import (
+    COMBINATIONS,
+    fit_combination,
+    off_diag_indices,
 )
 
 # ---------------------------------------------------------------------------
@@ -75,73 +74,56 @@ N_PROJ = 30
 MAXITER = 2000            # same budget for every combination
 OPTIMIZER_METHOD = "Nelder-Mead"   # alternatives: "Powell", "COBYLA"
 
-COMBINATIONS = {
-    "OU":          {"ou"},
-    "FP":          {"fp"},
-    "OU+FP":       {"ou", "fp"},
-    "OU+Cons":     {"ou", "cons"},
-    "FP+Cons":     {"fp", "cons"},
-    "OU+FP+Cons":  {"ou", "fp", "cons"},
-}
+# COMBINATIONS is imported from _ours_combinations rather than redefined, so
+# this script and every other comparison in the branch sweep the same six.
 
 sim = make_single_gene_knockout_sim(
     num_genes=N_GENES, knockout_gene=KO_GENE, seed=SEED,
     t_star=T_STAR, network_density=NETWORK_DENSITY,
 )
 snapshots, times, MU_KNOWN, DT = extract_snapshots(sim, N_CELLS, N_SNAPS, T=T)
-chi = [preprocessing(X) for X in snapshots]
 
 A_TRUE = sim.A
 SIGMA_TRUE = effective_sigma(sim)
-OFF = [(i, j) for i in range(N_GENES) for j in range(N_GENES) if i != j]
+OFF = off_diag_indices(N_GENES)
 true_off = np.array([A_TRUE[i, j] for i, j in OFF])
 
 
 # ---------------------------------------------------------------------------
-# theta <-> vector:  [log diag(A) (G), off-diagonals (G^2-G), log sigma (1)]
+# Fitting is delegated to _ours_combinations.fit_combination, which owns the
+# theta <-> vector encoding ([log diag(A) (G), off-diagonals (G^2-G), log
+# sigma (1)]), the deliberately wrong edge-free start x0 = 1.2*I, and -- the
+# reason this script no longer calls scipy.optimize.minimize itself -- the
+# custom initial simplex.
+#
+# scipy's own Nelder-Mead simplex steps each coordinate by x0[k]*1.05, EXCEPT
+# where x0[k] == 0, where it substitutes a hardcoded absolute 0.00025
+# (_minimize_neldermead's zdelt). Every off-diagonal entry of x0 is exactly 0
+# here, so all G^2-G edge directions were born with a simplex edge length of
+# 0.00025 -- below this script's own xatol=1e-3, i.e. already "converged" at
+# iteration zero. That is why every earlier run of this file returned an A
+# whose off-diagonals were still exactly their starting value: the reported
+# offdiag_err (1.6451-1.6453 across all six) equalled ||true off-diagonals||
+# = 1.6452 to five significant figures.
+#
+# fit_combination's _initial_simplex gives zero-valued coordinates the same
+# absolute step scipy gives the diagonal (0.06 = 1.2 * 0.05). It also carries
+# the LinAlgError guard for candidate A's that collapse the propagated cloud
+# onto a lower-dimensional subspace and make gaussian_kde singular.
 # ---------------------------------------------------------------------------
 
-def encode(A: np.ndarray, sigma: float) -> np.ndarray:
-    return np.concatenate([np.log(np.diag(A)), [A[i, j] for i, j in OFF], [np.log(sigma)]])
-
-
-def decode(x: np.ndarray) -> Theta:
-    A = np.diag(np.exp(x[:N_GENES]))
-    for n, (i, j) in enumerate(OFF):
-        A[i, j] = x[N_GENES + n]
-    return Theta(A=A, mu=MU_KNOWN, sigma=float(np.exp(x[-1])))
-
-
-def make_objective(terms: set[str]):
-    def objective(x):
-        theta = decode(x)
-        total = 0.0
-        if "ou" in terms:
-            total += loss_ou(theta, snapshots, chi, DT, n_proj=N_PROJ, seed=0)
-        if "fp" in terms:
-            total += loss_fp(theta, snapshots, chi, DT, n_proj=N_PROJ, seed=0)
-        if "cons" in terms:
-            total += loss_cons(theta, snapshots, chi, DT, n_proj=N_PROJ, seed=0)
-        return total
-    return objective
-
-
-# Deliberately wrong, edge-free start: no knowledge of the network
-x0 = encode(np.eye(N_GENES) * 1.2, 0.5)
-
-print(f"fitting {len(x0)} params (full A + sigma), mu fixed at known {{mu_k}}")
-print(f"true sigma={SIGMA_TRUE:.3f} | budget={MAXITER} iters/combination\n")
+print(f"fitting {N_GENES**2 + 1} params (full A + sigma), mu fixed at known {{mu_k}}")
+print(f"true sigma={SIGMA_TRUE:.3f} | budget={MAXITER} iters/combination")
+print(f"optimizer={OPTIMIZER_METHOD} via _ours_combinations.fit_combination "
+      f"(custom initial simplex)\n")
 
 rows, fitted = [], {}
 for name, terms in COMBINATIONS.items():
     print(f"[{name}] optimising ...", flush=True)
-    t0 = time.perf_counter()
-    res = scipy.optimize.minimize(
-        make_objective(terms), x0, method=OPTIMIZER_METHOD,
-        options={"maxiter": MAXITER, "xatol": 1e-3, "fatol": 1e-6, "adaptive": True},
+    theta_hat, info = fit_combination(
+        terms, snapshots, MU_KNOWN, DT, N_GENES,
+        n_proj=N_PROJ, maxiter=MAXITER, method=OPTIMIZER_METHOD, seed=0,
     )
-    elapsed = time.perf_counter() - t0
-    theta_hat = decode(res.x)
     fitted[name] = theta_hat
 
     hat_off = np.array([theta_hat.A[i, j] for i, j in OFF])
@@ -153,10 +135,11 @@ for name, terms in COMBINATIONS.items():
     rows.append({
         "combination": name, "A_err": A_err, "offdiag_err": off_err,
         "edge_corr": edge_corr, "sigma_err": sigma_err,
-        "final_objective": res.fun, "n_evals": res.nfev, "seconds": round(elapsed, 1),
+        "final_objective": info["final_objective"],
+        "n_evals": info["n_evals"], "seconds": info["seconds"],
     })
     print(f"  A_err={A_err:.3f}  offdiag_err={off_err:.3f}  edge_corr={edge_corr:+.3f}  "
-          f"sigma_err={sigma_err:.3f}  evals={res.nfev}  {elapsed:.0f}s")
+          f"sigma_err={sigma_err:.3f}  evals={info['n_evals']}  {info['seconds']:.0f}s")
 
 df = pd.DataFrame(rows)
 csv_path = Path(__file__).parent / "loss_comparison_knockout.csv"

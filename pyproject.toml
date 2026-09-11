@@ -12,6 +12,7 @@ dependencies = [
     "cma>=4.4.4",
     "jax[cpu]>=0.10.1",
     "matplotlib>=3.10.8",
+    "networkx>=3.6.1",
     "numpy>=2.4.3",
     "optax>=0.2.8",
     "ott-jax[neural]>=0.6.0",
