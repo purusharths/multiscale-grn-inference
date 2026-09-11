@@ -1,301 +1,144 @@
 """
 Which loss combination best recovers the GRN from single-gene knockout data?
 
-Dataset: the coupled 5-gene single-gene-knockout scenario from
-../plot_single_gene_knockout.py (gene_0 knocked out at t_star=2.0, T=7.0,
-network_density=0.3 so A has real off-diagonal edges).
+Dataset: the coupled single-gene-knockout scenario from
+../plot_single_gene_knockout.py (one gene knocked out at t_star, network with
+real off-diagonal edges).
 
-What is fitted: the FULL interaction matrix A (diagonal via exp() to keep
-it positive, all 20 off-diagonals free) plus sigma -- 26 parameters. The
+What is fitted: the FULL interaction matrix A (diagonal via exp() to keep it
+positive, all off-diagonals free) plus sigma -- G^2 + 1 parameters. The
 intervention means {mu_k} are held FIXED at their true values, because
-Algorithm 1 takes them as given input ("Data: Known Intervention means",
-paper line 2). So this measures exactly the thing GRN inference is for:
-recovering who regulates whom, given known perturbations.
+Algorithm 1 takes them as given input ("Data: Known Intervention means", paper
+line 2). So this measures exactly the thing GRN inference is for: recovering
+who regulates whom, given known perturbations.
 
-Combinations compared (as requested):
-    OU, FP, OU+FP, OU+Cons, FP+Cons, OU+FP+Cons
-Cons-alone is deliberately excluded -- earlier sweeps
-(../../../compare_loss_combinations.py) established it is degenerate on its
-own: it only checks that the OU and FP forward models agree with EACH
+Combinations compared: OU, FP, OU+FP, OU+Cons, FP+Cons, OU+FP+Cons (imported
+from _ours_combinations). Cons-alone is deliberately excluded -- earlier
+sweeps (../../../compare_loss_combinations.py) established it is degenerate on
+its own: it only checks that the OU and FP forward models agree with EACH
 OTHER, never with the data, so it is trivially minimised by wrong dynamics.
 
-Amortized: every combination gets the same optimizer, the same budget, and
-the same (deliberately wrong, edge-free) starting point A = 1.2*I.
+Amortized: every combination gets the same optimizer, the same budget, and the
+same (deliberately wrong, edge-free) starting point A = 1.2*I.
 
-Metrics reported:
-  A_err          -- ||A_hat - A_true||_F over the whole matrix
-  offdiag_err    -- ||.||_F restricted to off-diagonals (the GRN edges)
-  edge_corr      -- Pearson r between true and recovered off-diagonals;
-                    the "did we get the network topology right" number
-  sigma_err      -- |sigma_hat - sigma_true|
+Outputs (all overwritten in place, next to this file):
+    loss_comparison_knockout.csv    metrics per combination
+    loss_comparison_knockout.png    metric bars + recovered A heatmaps
+    grn_networks_knockout.png       recovered GRNs vs ground truth (networkx)
+    recovered_matrices_knockout.npz the fitted A/sigma themselves, so a new
+                                    question about the results doesn't cost
+                                    another multi-hour refit
 
-Not a test -- a standalone report script. Re-run anytime; always overwrites
-this folder's loss_comparison_knockout.{csv,png}.
+Two ways to run
+---------------
+Serial, all six in one process (~3h at the default config):
 
-Usage:
     uv run python "tests/diagnostics/interventions/single-gene-knockout/loss-combinations/compare_losses_single_gene_knockout.py"
+
+Array-parallel, one process per combination, then merge. The six fits are
+independent, so this finishes in the time of the SLOWEST single combination
+rather than their sum:
+
+    ... compare_losses_single_gene_knockout.py --combination OU --out-dir parts/
+    ... merge_knockout_parts.py parts/
+
+See run_knockout_array.sh for the SLURM job array that does this.
+
+Not a test -- a standalone report script.
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from multsc_grn_inference.housekeeping.edge_recovery_metrics import (
-    auprc,
-    auroc,
-    edge_labels,
-    precision_at_k,
-    recall_at_k,
-)
-from multsc_grn_inference.housekeeping.grn_graph import (
-    draw_grn,
-    shared_layout,
-    true_edge_set,
-)
-
-from _intervention_ground_truth import (
-    effective_sigma,
-    extract_snapshots,
-    make_single_gene_knockout_sim,
-)
-from _ours_combinations import (
+from _knockout_plots import grn_networks, metrics_and_heatmaps
+from _knockout_shared import (
     COMBINATIONS,
-    fit_combination,
-    off_diag_indices,
+    DATA_SEED,
+    FIT_SEED,
+    MAXITER,
+    N_GENES,
+    build_dataset,
+    run_one,
+    summary_line,
 )
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
-N_GENES = 8
-KO_GENE = 3
-N_CELLS = 3000
-N_SNAPS = 15
-T = 7.0
-T_STAR = 2.0
-NETWORK_DENSITY = 0.5
-SEED = 42
-
-N_PROJ = 30
-MAXITER = 2000            # same budget for every combination
-OPTIMIZER_METHOD = "Nelder-Mead"   # alternatives: "Powell", "COBYLA"
-
-# COMBINATIONS is imported from _ours_combinations rather than redefined, so
-# this script and every other comparison in the branch sweep the same six.
-
-sim = make_single_gene_knockout_sim(
-    num_genes=N_GENES, knockout_gene=KO_GENE, seed=SEED,
-    t_star=T_STAR, network_density=NETWORK_DENSITY,
-)
-snapshots, times, MU_KNOWN, DT = extract_snapshots(sim, N_CELLS, N_SNAPS, T=T)
-
-A_TRUE = sim.A
-SIGMA_TRUE = effective_sigma(sim)
-OFF = off_diag_indices(N_GENES)
-true_off = np.array([A_TRUE[i, j] for i, j in OFF])
-
-# k for precision@k / recall@k and for thresholding the recovered networks:
-# the number of edges that actually exist. Allowing each method exactly as
-# many edges as the truth has is the like-for-like question -- "given a budget
-# of K edges, which K do you pick" -- and it makes the drawn graphs directly
-# comparable to the true one instead of dense.
-TRUE_LABELS = edge_labels(true_off)
-K_EDGES = int(TRUE_LABELS.sum())
-TRUE_EDGES = true_edge_set(A_TRUE)
+HERE = Path(__file__).parent
 
 
-# ---------------------------------------------------------------------------
-# Fitting is delegated to _ours_combinations.fit_combination, which owns the
-# theta <-> vector encoding ([log diag(A) (G), off-diagonals (G^2-G), log
-# sigma (1)]), the deliberately wrong edge-free start x0 = 1.2*I, and -- the
-# reason this script no longer calls scipy.optimize.minimize itself -- the
-# custom initial simplex.
-#
-# scipy's own Nelder-Mead simplex steps each coordinate by x0[k]*1.05, EXCEPT
-# where x0[k] == 0, where it substitutes a hardcoded absolute 0.00025
-# (_minimize_neldermead's zdelt). Every off-diagonal entry of x0 is exactly 0
-# here, so all G^2-G edge directions were born with a simplex edge length of
-# 0.00025 -- below this script's own xatol=1e-3, i.e. already "converged" at
-# iteration zero. That is why every earlier run of this file returned an A
-# whose off-diagonals were still exactly their starting value: the reported
-# offdiag_err (1.6451-1.6453 across all six) equalled ||true off-diagonals||
-# = 1.6452 to five significant figures.
-#
-# fit_combination's _initial_simplex gives zero-valued coordinates the same
-# absolute step scipy gives the diagonal (0.06 = 1.2 * 0.05). It also carries
-# the LinAlgError guard for candidate A's that collapse the propagated cloud
-# onto a lower-dimensional subspace and make gaussian_kde singular.
-# ---------------------------------------------------------------------------
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--combination", choices=list(COMBINATIONS),
+                   help="fit only this one and write a part file (array mode). "
+                        "Omit to fit all six and write the full outputs.")
+    p.add_argument("--data-seed", type=int, default=DATA_SEED,
+                   help="seed for the network + cells. Vary across jobs to ask "
+                        "whether results hold on GRNs in general.")
+    p.add_argument("--fit-seed", type=int, default=FIT_SEED,
+                   help="seed for the objective's own stochasticity.")
+    p.add_argument("--out-dir", type=Path, default=HERE,
+                   help="where part files are written (array mode).")
+    args = p.parse_args()
 
-print(f"fitting {N_GENES**2 + 1} params (full A + sigma), mu fixed at known {{mu_k}}")
-print(f"true sigma={SIGMA_TRUE:.3f} | budget={MAXITER} iters/combination")
-print(f"optimizer={OPTIMIZER_METHOD} via _ours_combinations.fit_combination "
-      f"(custom initial simplex)\n")
+    d = build_dataset(args.data_seed)
+    print(f"fitting {N_GENES**2 + 1} params (full A + sigma), mu fixed at known {{mu_k}}")
+    print(f"true sigma={d.sigma_true:.3f} | {d.k_edges} true edges | budget={MAXITER} iters")
+    print(f"data_seed={args.data_seed} fit_seed={args.fit_seed}\n", flush=True)
 
-rows, fitted = [], {}
-for name, terms in COMBINATIONS.items():
-    print(f"[{name}] optimising ...", flush=True)
-    theta_hat, info = fit_combination(
-        terms, snapshots, MU_KNOWN, DT, N_GENES,
-        n_proj=N_PROJ, maxiter=MAXITER, method=OPTIMIZER_METHOD, seed=0,
-    )
-    fitted[name] = theta_hat
+    # ----- array mode: one combination, one part file ----------------------
+    if args.combination:
+        name = args.combination
+        print(f"[{name}] optimising ...", flush=True)
+        theta_hat, row = run_one(name, d, fit_seed=args.fit_seed,
+                                 data_seed=args.data_seed)
+        print(summary_line(row), flush=True)
 
-    hat_off = np.array([theta_hat.A[i, j] for i, j in OFF])
-    A_err = float(np.linalg.norm(theta_hat.A - A_TRUE))
-    off_err = float(np.linalg.norm(hat_off - true_off))
-    edge_corr = float(np.corrcoef(true_off, hat_off)[0, 1]) if hat_off.std() > 1e-12 else 0.0
-    sigma_err = abs(theta_hat.sigma - SIGMA_TRUE)
+        args.out_dir.mkdir(parents=True, exist_ok=True)
+        # Part filename carries both seeds, so a multi-seed sweep can write
+        # every task into one directory without collisions.
+        part = args.out_dir / f"part_{name}_d{args.data_seed}_f{args.fit_seed}.npz"
+        np.savez(part, A_hat=theta_hat.A, sigma_hat=theta_hat.sigma,
+                 A_true=d.A_true, sigma_true=d.sigma_true,
+                 true_off=d.true_off, k_edges=d.k_edges,
+                 row_keys=np.array(list(row.keys())),
+                 row_vals=np.array([str(v) for v in row.values()]))
+        print(f"Saved: {part}")
+        return
 
-    rows.append({
-        "combination": name, "A_err": A_err, "offdiag_err": off_err,
-        "edge_corr": edge_corr,
-        # Detection metrics: rank candidate edges by |A_hat_ij| and score that
-        # ranking against which entries are really edges. edge_corr conflates
-        # "found the right pairs" with "got the magnitudes right" and is
-        # dominated by a few large entries -- these are what the GRN-inference
-        # literature (DREAM4/5) actually reports.
-        "auprc": auprc(true_off, hat_off),
-        "auroc": auroc(true_off, hat_off),
-        "precision_at_k": precision_at_k(true_off, hat_off, K_EDGES),
-        "recall_at_k": recall_at_k(true_off, hat_off, K_EDGES),
-        "sigma_err": sigma_err,
-        "final_objective": info["final_objective"],
-        "n_evals": info["n_evals"], "seconds": info["seconds"],
-    })
-    r = rows[-1]
-    print(f"  A_err={A_err:.3f}  edge_corr={edge_corr:+.3f}  AUPRC={r['auprc']:.3f}  "
-          f"AUROC={r['auroc']:.3f}  P@{K_EDGES}={r['precision_at_k']:.3f}  "
-          f"sigma_err={sigma_err:.3f}  evals={info['n_evals']}  {info['seconds']:.0f}s")
+    # ----- serial mode: all six, full outputs -------------------------------
+    rows, fitted = [], {}
+    for name in COMBINATIONS:
+        print(f"[{name}] optimising ...", flush=True)
+        theta_hat, row = run_one(name, d, fit_seed=args.fit_seed,
+                                 data_seed=args.data_seed)
+        fitted[name] = theta_hat.A
+        rows.append(row)
+        print(summary_line(row), flush=True)
 
-df = pd.DataFrame(rows)
-csv_path = Path(__file__).parent / "loss_comparison_knockout.csv"
-df.to_csv(csv_path, index=False)
-print(f"\nSaved: {csv_path}")
-print(df.to_string(index=False))
+    df = pd.DataFrame(rows)
+    csv_path = HERE / "loss_comparison_knockout.csv"
+    df.to_csv(csv_path, index=False)
+    print(f"\nSaved: {csv_path}")
+    print(df.to_string(index=False))
 
-# Persist the fitted matrices themselves. This run costs hours, and without
-# them any new question about the recovered networks (a different threshold, a
-# different metric, a different plot) means refitting from scratch. Load with:
-#   d = np.load(path); d["OU"], d["A_true"], ...
-npz_path = Path(__file__).parent / "recovered_matrices_knockout.npz"
-np.savez(
-    npz_path,
-    A_true=A_TRUE,
-    sigma_true=SIGMA_TRUE,
-    mu_known=np.array(MU_KNOWN),
-    **{name: fitted[name].A for name in COMBINATIONS},
-    **{f"sigma_{name}": fitted[name].sigma for name in COMBINATIONS},
-)
-print(f"Saved: {npz_path}")
+    npz_path = HERE / "recovered_matrices_knockout.npz"
+    np.savez(npz_path, A_true=d.A_true, sigma_true=d.sigma_true,
+             **{n: fitted[n] for n in fitted})
+    print(f"Saved: {npz_path}")
 
-# ---------------------------------------------------------------------------
-# Plot: metric bars (top) + recovered A heatmaps (below)
-# ---------------------------------------------------------------------------
+    metrics_and_heatmaps(df, fitted, d.A_true, HERE / "loss_comparison_knockout.png")
+    print(f"Saved: {HERE / 'loss_comparison_knockout.png'}")
+    grn_networks(df, fitted, d.A_true, d.true_off, d.k_edges,
+                 HERE / "grn_networks_knockout.png")
+    print(f"Saved: {HERE / 'grn_networks_knockout.png'}")
 
-fig, axes = plt.subplots(3, 4, figsize=(18, 12))
 
-metrics = [
-    ("A_err", "||A_hat - A_true||_F   (lower better)"),
-    ("offdiag_err", "off-diagonal error   (lower better)"),
-    ("edge_corr", "edge correlation r   (HIGHER better)"),
-    ("sigma_err", "|sigma_hat - sigma_true|   (lower better)"),
-]
-for ax, (col, title) in zip(axes[0], metrics):
-    best = df[col].idxmax() if col == "edge_corr" else df[col].idxmin()
-    colors = ["#1a9641" if i == best else "#4393c3" for i in df.index]
-    ax.bar(df["combination"], df[col], color=colors)
-    ax.set_title(title, fontsize=9)
-    ax.tick_params(axis="x", rotation=35, labelsize=7)
-    ax.axhline(0, color="black", lw=0.8)
-
-vmax = np.abs(A_TRUE).max() * 1.2
-panels = [("TRUE A", A_TRUE)] + [(n, fitted[n].A) for n in COMBINATIONS]
-for ax, (name, mat) in zip(axes[1:].ravel(), panels):
-    im = ax.imshow(mat, cmap="RdBu_r", vmin=-vmax, vmax=vmax)
-    for i in range(N_GENES):
-        for j in range(N_GENES):
-            ax.text(j, i, f"{mat[i, j]:.1f}", ha="center", va="center", fontsize=6,
-                    color="white" if abs(mat[i, j]) > 0.6 * vmax else "black")
-    ax.set_xticks(range(N_GENES)); ax.set_xticklabels([f"g{j}" for j in range(N_GENES)], fontsize=6)
-    ax.set_yticks(range(N_GENES)); ax.set_yticklabels([f"g{i}" for i in range(N_GENES)], fontsize=6)
-    ax.set_title(name, fontsize=9, fontweight="bold" if name == "TRUE A" else "normal")
-for ax in axes[1:].ravel()[len(panels):]:
-    ax.set_visible(False)
-
-fig.suptitle(f"Loss-combination comparison on single-gene knockout data  "
-             f"(gene_{KO_GENE} KO, {N_GENES} genes, density={NETWORK_DENSITY}, "
-             f"fitting full A + sigma, mu known;  {OPTIMIZER_METHOD}, maxiter={MAXITER})")
-fig.tight_layout()
-
-png_path = Path(__file__).parent / "loss_comparison_knockout.png"
-fig.savefig(png_path, dpi=150, bbox_inches="tight")
-plt.close(fig)
-print(f"Saved: {png_path}")
-
-# ---------------------------------------------------------------------------
-# GRN view: the recovered regulatory network vs the true one
-#
-# The heatmaps above show whether the NUMBERS in A are right. These show
-# whether the STRUCTURE is -- which genes regulate which, and with what sign.
-# Every panel shares the true network's node layout, so the same gene sits in
-# the same place throughout and panels can be compared by eye.
-#
-# Each recovered network is thresholded to its top-K edges by |A_hat_ij|, with
-# K = the number of edges that truly exist, so every method is shown with the
-# same edge budget as the ground truth. Edges that are real are solid; false
-# positives are dashed and pale.
-# ---------------------------------------------------------------------------
-
-pos = shared_layout(A_TRUE)
-scale = float(np.abs(true_off).max())
-
-fig2, axes2 = plt.subplots(2, 4, figsize=(19, 9.5))
-ax_list = axes2.ravel()
-
-stats = draw_grn(ax_list[0], A_TRUE, pos, title="", threshold=1e-9,
-                 highlight=KO_GENE, scale_by=scale)
-ax_list[0].set_title(f"GROUND TRUTH\n{stats['n_edges']} edges", fontsize=10, fontweight="bold")
-
-for ax, name in zip(ax_list[1:], COMBINATIONS):
-    row = df[df["combination"] == name].iloc[0]
-    s = draw_grn(ax, fitted[name].A, pos, top_k=K_EDGES, highlight=KO_GENE,
-                 true_edges=TRUE_EDGES, scale_by=scale, title="")
-    ax.set_title(
-        f"{name}\n{s['n_correct']}/{s['n_edges']} correct  "
-        f"AUPRC {row['auprc']:.2f}  P@{K_EDGES} {row['precision_at_k']:.2f}",
-        fontsize=9,
-    )
-
-for ax in ax_list[len(COMBINATIONS) + 1:]:
-    ax.set_visible(False)
-
-legend = [
-    plt.Line2D([], [], color="#1B7C6F", lw=3, label="activation  (A_ij > 0)"),
-    plt.Line2D([], [], color="#C2601F", lw=3, label="inhibition  (A_ij < 0)"),
-    plt.Line2D([], [], color="#4A544F", lw=2, ls=(0, (3, 2)), alpha=.6, label="false positive"),
-    plt.Line2D([], [], marker="o", ls="", markerfacecolor="#F2D7C9",
-               markeredgecolor="black", markeredgewidth=2, markersize=11,
-               label=f"knocked-out gene (g{KO_GENE})"),
-]
-fig2.legend(handles=legend, loc="lower center", ncol=4, fontsize=10, frameon=False)
-
-fig2.suptitle(
-    f"Recovered GRN structure vs ground truth  (gene_{KO_GENE} KO, {N_GENES} genes, "
-    f"density={NETWORK_DENSITY}; each panel thresholded to its top {K_EDGES} edges; "
-    f"arrow j→i means gene j regulates gene i)",
-    fontsize=11,
-)
-fig2.tight_layout(rect=(0, 0.045, 1, 1))
-
-grn_path = Path(__file__).parent / "grn_networks_knockout.png"
-fig2.savefig(grn_path, dpi=150, bbox_inches="tight")
-plt.close(fig2)
-print(f"Saved: {grn_path}")
+if __name__ == "__main__":
+    main()
