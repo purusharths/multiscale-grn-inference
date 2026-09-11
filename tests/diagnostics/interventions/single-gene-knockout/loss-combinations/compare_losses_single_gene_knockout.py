@@ -46,6 +46,19 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from multsc_grn_inference.housekeeping.edge_recovery_metrics import (
+    auprc,
+    auroc,
+    edge_labels,
+    precision_at_k,
+    recall_at_k,
+)
+from multsc_grn_inference.housekeeping.grn_graph import (
+    draw_grn,
+    shared_layout,
+    true_edge_set,
+)
+
 from _intervention_ground_truth import (
     effective_sigma,
     extract_snapshots,
@@ -87,6 +100,15 @@ A_TRUE = sim.A
 SIGMA_TRUE = effective_sigma(sim)
 OFF = off_diag_indices(N_GENES)
 true_off = np.array([A_TRUE[i, j] for i, j in OFF])
+
+# k for precision@k / recall@k and for thresholding the recovered networks:
+# the number of edges that actually exist. Allowing each method exactly as
+# many edges as the truth has is the like-for-like question -- "given a budget
+# of K edges, which K do you pick" -- and it makes the drawn graphs directly
+# comparable to the true one instead of dense.
+TRUE_LABELS = edge_labels(true_off)
+K_EDGES = int(TRUE_LABELS.sum())
+TRUE_EDGES = true_edge_set(A_TRUE)
 
 
 # ---------------------------------------------------------------------------
@@ -134,11 +156,23 @@ for name, terms in COMBINATIONS.items():
 
     rows.append({
         "combination": name, "A_err": A_err, "offdiag_err": off_err,
-        "edge_corr": edge_corr, "sigma_err": sigma_err,
+        "edge_corr": edge_corr,
+        # Detection metrics: rank candidate edges by |A_hat_ij| and score that
+        # ranking against which entries are really edges. edge_corr conflates
+        # "found the right pairs" with "got the magnitudes right" and is
+        # dominated by a few large entries -- these are what the GRN-inference
+        # literature (DREAM4/5) actually reports.
+        "auprc": auprc(true_off, hat_off),
+        "auroc": auroc(true_off, hat_off),
+        "precision_at_k": precision_at_k(true_off, hat_off, K_EDGES),
+        "recall_at_k": recall_at_k(true_off, hat_off, K_EDGES),
+        "sigma_err": sigma_err,
         "final_objective": info["final_objective"],
         "n_evals": info["n_evals"], "seconds": info["seconds"],
     })
-    print(f"  A_err={A_err:.3f}  offdiag_err={off_err:.3f}  edge_corr={edge_corr:+.3f}  "
+    r = rows[-1]
+    print(f"  A_err={A_err:.3f}  edge_corr={edge_corr:+.3f}  AUPRC={r['auprc']:.3f}  "
+          f"AUROC={r['auroc']:.3f}  P@{K_EDGES}={r['precision_at_k']:.3f}  "
           f"sigma_err={sigma_err:.3f}  evals={info['n_evals']}  {info['seconds']:.0f}s")
 
 df = pd.DataFrame(rows)
@@ -146,6 +180,21 @@ csv_path = Path(__file__).parent / "loss_comparison_knockout.csv"
 df.to_csv(csv_path, index=False)
 print(f"\nSaved: {csv_path}")
 print(df.to_string(index=False))
+
+# Persist the fitted matrices themselves. This run costs hours, and without
+# them any new question about the recovered networks (a different threshold, a
+# different metric, a different plot) means refitting from scratch. Load with:
+#   d = np.load(path); d["OU"], d["A_true"], ...
+npz_path = Path(__file__).parent / "recovered_matrices_knockout.npz"
+np.savez(
+    npz_path,
+    A_true=A_TRUE,
+    sigma_true=SIGMA_TRUE,
+    mu_known=np.array(MU_KNOWN),
+    **{name: fitted[name].A for name in COMBINATIONS},
+    **{f"sigma_{name}": fitted[name].sigma for name in COMBINATIONS},
+)
+print(f"Saved: {npz_path}")
 
 # ---------------------------------------------------------------------------
 # Plot: metric bars (top) + recovered A heatmaps (below)
@@ -190,3 +239,63 @@ png_path = Path(__file__).parent / "loss_comparison_knockout.png"
 fig.savefig(png_path, dpi=150, bbox_inches="tight")
 plt.close(fig)
 print(f"Saved: {png_path}")
+
+# ---------------------------------------------------------------------------
+# GRN view: the recovered regulatory network vs the true one
+#
+# The heatmaps above show whether the NUMBERS in A are right. These show
+# whether the STRUCTURE is -- which genes regulate which, and with what sign.
+# Every panel shares the true network's node layout, so the same gene sits in
+# the same place throughout and panels can be compared by eye.
+#
+# Each recovered network is thresholded to its top-K edges by |A_hat_ij|, with
+# K = the number of edges that truly exist, so every method is shown with the
+# same edge budget as the ground truth. Edges that are real are solid; false
+# positives are dashed and pale.
+# ---------------------------------------------------------------------------
+
+pos = shared_layout(A_TRUE)
+scale = float(np.abs(true_off).max())
+
+fig2, axes2 = plt.subplots(2, 4, figsize=(19, 9.5))
+ax_list = axes2.ravel()
+
+stats = draw_grn(ax_list[0], A_TRUE, pos, title="", threshold=1e-9,
+                 highlight=KO_GENE, scale_by=scale)
+ax_list[0].set_title(f"GROUND TRUTH\n{stats['n_edges']} edges", fontsize=10, fontweight="bold")
+
+for ax, name in zip(ax_list[1:], COMBINATIONS):
+    row = df[df["combination"] == name].iloc[0]
+    s = draw_grn(ax, fitted[name].A, pos, top_k=K_EDGES, highlight=KO_GENE,
+                 true_edges=TRUE_EDGES, scale_by=scale, title="")
+    ax.set_title(
+        f"{name}\n{s['n_correct']}/{s['n_edges']} correct  "
+        f"AUPRC {row['auprc']:.2f}  P@{K_EDGES} {row['precision_at_k']:.2f}",
+        fontsize=9,
+    )
+
+for ax in ax_list[len(COMBINATIONS) + 1:]:
+    ax.set_visible(False)
+
+legend = [
+    plt.Line2D([], [], color="#1B7C6F", lw=3, label="activation  (A_ij > 0)"),
+    plt.Line2D([], [], color="#C2601F", lw=3, label="inhibition  (A_ij < 0)"),
+    plt.Line2D([], [], color="#4A544F", lw=2, ls=(0, (3, 2)), alpha=.6, label="false positive"),
+    plt.Line2D([], [], marker="o", ls="", markerfacecolor="#F2D7C9",
+               markeredgecolor="black", markeredgewidth=2, markersize=11,
+               label=f"knocked-out gene (g{KO_GENE})"),
+]
+fig2.legend(handles=legend, loc="lower center", ncol=4, fontsize=10, frameon=False)
+
+fig2.suptitle(
+    f"Recovered GRN structure vs ground truth  (gene_{KO_GENE} KO, {N_GENES} genes, "
+    f"density={NETWORK_DENSITY}; each panel thresholded to its top {K_EDGES} edges; "
+    f"arrow j→i means gene j regulates gene i)",
+    fontsize=11,
+)
+fig2.tight_layout(rect=(0, 0.045, 1, 1))
+
+grn_path = Path(__file__).parent / "grn_networks_knockout.png"
+fig2.savefig(grn_path, dpi=150, bbox_inches="tight")
+plt.close(fig2)
+print(f"Saved: {grn_path}")
