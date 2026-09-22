@@ -76,7 +76,20 @@ NETWORK_DENSITY = _env("NETWORK_DENSITY", 0.5)
 DATA_SEED = _env("DATA_SEED", 42, int)
 FIT_SEED = _env("FIT_SEED", 0, int)
 
-N_PROJ = _env("N_PROJ", 30, int)
+# 300, not 30. Measured signal-to-noise of the edge signal (how much loss the
+# 28 true edges buy) against the objective's own seed-to-seed spread, at this
+# config, after the KDE round-trip was removed from compute_loss.py:
+#     n_proj    signal   noise sd    S/N    sec/eval
+#         30   0.05589    0.03216   1.74       0.087
+#        100   0.05431    0.01029   5.28       0.286
+#        300   0.05887    0.00742   7.93       0.844
+#       1000   0.05763    0.00412  13.99       2.765
+# 30 projections do not cover the sphere in 8 dimensions -- its noise is ~3x
+# worse than the 1/sqrt(n_proj) trend predicts. It was only survivable before
+# because the KDE round-trip was smoothing the clouds, trading bias for
+# variance; with the bias gone the variance has to be paid for honestly.
+# 100 is the economical setting if run time matters.
+N_PROJ = _env("N_PROJ", 300, int)
 MAXITER = _env("MAXITER", 2000, int)   # same budget for every combination
 OPTIMIZER_METHOD = os.environ.get("GRN_OPTIMIZER", "Nelder-Mead")
 

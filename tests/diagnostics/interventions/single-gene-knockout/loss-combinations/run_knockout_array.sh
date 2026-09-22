@@ -73,11 +73,29 @@ SCRIPT="$REPO/tests/diagnostics/interventions/single-gene-knockout/loss-combinat
 mkdir -p "$SCRIPT/parts"
 cd "$REPO"
 
-command -v uv >/dev/null || { echo "ERROR: uv not on PATH ($PATH)" >&2; exit 1; }
+# Call the venv's interpreter directly rather than going through `uv run`.
+#
+# `uv run` re-syncs the project into .venv on EVERY invocation. With an array,
+# all tasks start at once and race to reinstall the local package into one
+# shared .venv: one process removes the .dist-info directory while another is
+# copying RECORD into it, and the loser dies with
+#     failed to copy file ... RECORD: No such file or directory (os error 2)
+# That is what killed 2 of the first 48 tasks. It is a filesystem race, not a
+# problem with the job -- and it gets likelier as the array grows.
+#
+# Run `uv sync` ONCE on a login node before submitting; tasks then only read
+# the venv, never write it, so there is nothing to contend over.
+if [[ -x "$REPO/.venv/bin/python" ]]; then
+    PY="$REPO/.venv/bin/python"
+else
+    command -v uv >/dev/null || { echo "ERROR: no .venv and uv not on PATH ($PATH)" >&2; exit 1; }
+    PY="uv run --no-sync python"   # --no-sync: never write to .venv from a task
+fi
 
 echo "task $i -> combination=$COMBO data_seed=$SEED  host=$(hostname)  $(date)"
+echo "interpreter: $PY"
 
-uv run python "$SCRIPT/compare_losses_single_gene_knockout.py" \
+$PY "$SCRIPT/compare_losses_single_gene_knockout.py" \
     --combination "$COMBO" \
     --data-seed   "$SEED" \
     --out-dir     "$SCRIPT/parts"
