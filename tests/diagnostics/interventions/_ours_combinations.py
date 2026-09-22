@@ -156,6 +156,7 @@ def fit_combination_cma(
     maxfevals: int = 2200,
     sigma0: float = 0.15,
     seed: int = 0,
+    x0: np.ndarray | None = None,
 ) -> tuple[Theta, dict]:
     """
     CMA-ES instead of Nelder-Mead -- see ../cma-es-test/README.md for why.
@@ -173,6 +174,11 @@ def fit_combination_cma(
     maxfevals=2200 matches fit_combination's typical evaluation count at
     maxiter=1500 (1978-2248 evals across the 6 combinations in
     ../jko-testing/jko_comparison.csv), for a budget-matched comparison.
+
+    x0 defaults to the generic diag(1.2)/all-zero-off-diagonal/sigma=0.5
+    guess; pass an estimate from ../moment-preconditioner-test/'s
+    closed-form moment matching to start the search closer to the truth
+    instead.
     """
     import cma
 
@@ -180,7 +186,8 @@ def fit_combination_cma(
     chi = [preprocessing(X) for X in snapshots]
     objective = _make_objective(terms, snapshots, chi, mu_known, dt, n_genes, off, n_proj, seed)
 
-    x0 = encode(np.eye(n_genes) * 1.2, 0.5, off)
+    if x0 is None:
+        x0 = encode(np.eye(n_genes) * 1.2, 0.5, off)
     t0 = time.perf_counter()
     xbest, es = cma.fmin2(
         objective, x0, sigma0,
