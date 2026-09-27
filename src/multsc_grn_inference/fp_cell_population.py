@@ -83,6 +83,42 @@ from multsc_grn_inference.preprocessing import preprocessing
 from multsc_grn_inference.theta import Theta
 
 
+def fp_particles(
+    chi_tk: gaussian_kde,
+    theta: Theta,
+    k: int,
+    dt: float,
+    *,
+    n_particles: int | None = None,
+    n_substeps: int = 1,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
+    """
+    The particle-JKO step, stopping one line short of fp_cell_population: it
+    returns the propagated PARTICLES rather than a density re-fitted to them.
+
+    Exists because every consumer in compute_loss.py wants samples, not a
+    density -- sliced-W2 is a sample-based distance. Going particles -> KDE ->
+    particles there added a (1 + h^2) covariance inflation (h = Scott's
+    bandwidth, so the bias grows with gene count) and a large chunk of the
+    objective's run-to-run noise, in exchange for nothing.
+
+    Note the INPUT resampling stays. chi_tk -> particles is what makes this the
+    macro-scale map at all: it is the only thing distinguishing FP (which sees
+    the population only through its estimated density) from OU (which tracks
+    the observed cells themselves). Drop that too and L_FP becomes L_OU and
+    L_cons becomes identically zero.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    n = n_particles or chi_tk.n
+    seed_val = int(rng.integers(0, 2**31))
+    particles = np.maximum(chi_tk.resample(n, seed=seed_val).T, 0.0)
+
+    return ou_gene_expression(particles, theta, k, dt, n_substeps=n_substeps, rng=rng)
+
+
 def fp_cell_population(
     chi_tk: gaussian_kde,
     theta: Theta,
@@ -96,14 +132,13 @@ def fp_cell_population(
     """
     nu* <- particle-JKO-step(chi_tk; A, mu_k, sigma, dt). See module docstring.
 
-    n_particles defaults to chi_tk's own fitted sample count (chi_tk.n).
+    Algorithm 1's FP map proper: density in, density out. n_particles defaults
+    to chi_tk's own fitted sample count (chi_tk.n).
+
+    Callers that only need samples should use fp_particles instead and skip the
+    KDE re-fit -- see its docstring for why.
     """
-    if rng is None:
-        rng = np.random.default_rng()
-
-    n = n_particles or chi_tk.n
-    seed_val = int(rng.integers(0, 2**31))
-    particles = np.maximum(chi_tk.resample(n, seed=seed_val).T, 0.0)
-
-    propagated = ou_gene_expression(particles, theta, k, dt, n_substeps=n_substeps, rng=rng)
-    return preprocessing(propagated)
+    return preprocessing(fp_particles(
+        chi_tk, theta, k, dt,
+        n_particles=n_particles, n_substeps=n_substeps, rng=rng,
+    ))

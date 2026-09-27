@@ -9,6 +9,8 @@ wheels/
 # Virtual environments
 .venv
 output/
+# Vendored external repos (cloned by setup scripts, not tracked)
+external/
 # Test / coverage artifacts
 .coverage
 coverage.xml
