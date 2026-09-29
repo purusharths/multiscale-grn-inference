@@ -14,6 +14,11 @@ so the fit's discretisation can be matched to, or ablated against, the
 generator's. Moment losses take rollout=True to propagate the predicted moments from
 snapshot 0 through the whole sequence instead of restarting from the data at
 each interval (multi-step error, more weight on the slow mean ramp).
+
+Combinations: a name like "kl+sw" or "kl+kl_ro" builds the SUM of its terms
+("<moment>_ro" is that moment loss with rollout=True). Each term is divided by
+its own value at A = I, the neutral start, so every term enters at 1 and none
+dominates just because of its units.
 """
 from __future__ import annotations
 
@@ -30,7 +35,7 @@ def _unit_directions(key, n_proj, G):
 
 
 def make_sw(problem, *, transition="exact", n_proj=200, resample=False,
-            floor=True, seed=0, transition_kw=None):
+            floor=True, seed=0, transition_kw=None, **_):
     trans = tr.get(transition, **(transition_kw or {}))
     X0, X1 = problem.snaps[:-1], problem.snaps[1:]
     K, n, G = X0.shape
@@ -130,7 +135,28 @@ def make_bures(problem, *, rollout=False, transition="exact", transition_kw=None
 BUILDERS = {"sw": make_sw, "kl": make_kl, "bures": make_bures}
 
 
-def build(problem, name, **kw):
+def _term(problem, name, **kw):
+    if name.endswith("_ro"):
+        name, kw = name[:-3], {**kw, "rollout": True}
     if name not in BUILDERS:
-        raise ValueError(f"unknown loss {name!r}; choose from {sorted(BUILDERS)}")
+        raise ValueError(f"unknown loss {name!r}; choose from {sorted(BUILDERS)} "
+                         f"(moment losses also as <name>_ro), joined by '+'")
     return BUILDERS[name](problem, **kw)
+
+
+def make_sum(problem, terms, **kw):
+    fs = [_term(problem, t, **kw) for t in terms]
+    A0, k0 = jnp.eye(problem.n_genes), jax.random.PRNGKey(0)
+    scales = [float(f(A0, k0)) for f in fs]
+    if not all(np.isfinite(c) and c > 0 for c in scales):
+        raise ValueError(f"term scales at A=I not positive: {dict(zip(terms, scales))}")
+
+    def loss(A, key=None):
+        return sum(f(A, key) / c for f, c in zip(fs, scales))
+
+    return loss
+
+
+def build(problem, name, **kw):
+    terms = name.split("+")
+    return _term(problem, name, **kw) if len(terms) == 1 else make_sum(problem, terms, **kw)

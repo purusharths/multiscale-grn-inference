@@ -4,6 +4,8 @@ Merge the per-task metrics_*.csv files of an array run (run_gradfit_ablation.py
 (gen_substeps, preset) over data seeds.
 
     python merge_gradfit_runs.py results/diagnostics/non-interventional/gradfit/em-ablation
+
+Also merges run_loss_combo_ablation.py runs (grouped by n_genes, n_cells too).
 """
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ import sys
 import pandas as pd
 
 COLS = ["rel_fro", "offdiag_corr", "edge_auroc", "sign_acc_on_edges",
-        "c0_gap", "c0gen_gap", "seconds"]
+        "c0_gap", "c0gen_gap", "c0sw_gap", "c0kl_gap", "seconds"]
 
 
 def main():
@@ -25,7 +27,7 @@ def main():
     df = pd.concat([pd.read_csv(p) for p in parts], ignore_index=True)
     df.to_csv(os.path.join(run_dir, "metrics.csv"), index=False)
 
-    keys = [k for k in ("gen_substeps", "preset") if k in df]
+    keys = [k for k in ("n_genes", "n_cells", "gen_substeps", "preset") if k in df]
     cols = [c for c in COLS if c in df]
     g = df.groupby(keys)[cols]
     mean, sd = g.mean(), g.std()

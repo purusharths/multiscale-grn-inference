@@ -17,7 +17,7 @@ from . import losses, optimizers, params
 
 @dataclass(frozen=True)
 class Stage:
-    loss: str = "sw"                 # sw | kl | bures
+    loss: str = "sw"                 # sw | kl | bures | kl_ro | sums like "kl+sw"
     optimizer: str = "lbfgs"         # adam | lbfgs | cma | nelder_mead
     lam: float = 0.0                 # smooth-L1 weight on off-diagonal A
     # loss options (ignored by losses that do not use them)
@@ -32,10 +32,10 @@ class Stage:
     def loss_kwargs(self):
         tkw = {"transition": self.transition,
                "transition_kw": {"n_sub": self.n_sub} if self.transition == "em" else None}
-        if self.loss == "sw":
-            return {**tkw, "n_proj": self.n_proj,
-                    "resample": self.resample, "floor": self.floor}
-        return {**tkw, "rollout": self.rollout}
+        # every builder ignores the options it does not use, so combined
+        # losses ("kl+sw") get both sets
+        return {**tkw, "n_proj": self.n_proj, "resample": self.resample,
+                "floor": self.floor, "rollout": self.rollout}
 
 
 @dataclass(frozen=True)
