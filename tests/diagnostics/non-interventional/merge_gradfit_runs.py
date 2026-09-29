@@ -28,7 +28,9 @@ def main():
     keys = [k for k in ("gen_substeps", "preset") if k in df]
     cols = [c for c in COLS if c in df]
     g = df.groupby(keys)[cols]
-    summary = g.mean().round(4).astype(str) + " ± " + g.std().round(4).astype(str)
+    mean, sd = g.mean(), g.std()
+    summary = pd.DataFrame({c: [f"{m:.4g} ± {s:.2g}" for m, s in zip(mean[c], sd[c])]
+                            for c in cols}, index=mean.index)
     summary.insert(0, "n_seeds", df.groupby(keys).size())
     with pd.option_context("display.width", 250, "display.max_columns", 20):
         print(summary)

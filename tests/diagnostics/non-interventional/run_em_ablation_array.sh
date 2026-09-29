@@ -7,6 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=8G
+#SBATCH --partition=krikri
 #
 # Euler-Maruyama ablation for the gradfit pipeline on the non-interventional
 # dataset: crosses the GENERATOR's discretisation with the FIT's.
