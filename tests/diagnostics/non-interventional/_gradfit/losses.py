@@ -9,7 +9,9 @@ Losses over the snapshot sequence. Every builder returns f(A, key) -> scalar.
          the linear-Gaussian model, deterministic, no particles.
   bures  same moments, Bures-Wasserstein W2^2 instead of KL.
 
-Moment losses take rollout=True to propagate the predicted moments from
+Every loss takes transition="exact" | "em" (with transition_kw={"n_sub": n}),
+so the fit's discretisation can be matched to, or ablated against, the
+generator's. Moment losses take rollout=True to propagate the predicted moments from
 snapshot 0 through the whole sequence instead of restarting from the data at
 each interval (multi-step error, more weight on the slow mean ramp).
 """
@@ -62,8 +64,8 @@ def _sqrtm_psd(S):
     return (V * np.sqrt(np.clip(w, 0, None))[..., None, :]) @ np.swapaxes(V, -1, -2)
 
 
-def _predicted_moments(A, problem, m, S, rollout):
-    F, Q = tr.ou_exact(A, problem.sigma, problem.dt)
+def _predicted_moments(A, problem, m, S, rollout, fq=tr.ou_exact):
+    F, Q = fq(A, problem.sigma, problem.dt)
     mu = problem.mu
 
     def one(mk, Sk):
@@ -80,7 +82,8 @@ def _predicted_moments(A, problem, m, S, rollout):
     return mp, Sp
 
 
-def make_kl(problem, *, rollout=False, **_):
+def make_kl(problem, *, rollout=False, transition="exact", transition_kw=None, **_):
+    fq = tr.moment_map(transition, **(transition_kw or {}))
     m_np, S_np = _empirical_moments(problem.snaps)
     m, S = jnp.asarray(m_np), jnp.asarray(S_np)
     m1, S1 = m[1:], S[1:]
@@ -96,13 +99,14 @@ def make_kl(problem, *, rollout=False, **_):
         return 0.5 * (tr_term + quad - G + logdet_p - ld_o)
 
     def loss(A, key=None):
-        mp, Sp = _predicted_moments(A, problem, m, S, rollout)
+        mp, Sp = _predicted_moments(A, problem, m, S, rollout, fq)
         return jnp.mean(jax.vmap(kl_one)(mp, Sp, m1, S1, logdet1))
 
     return loss
 
 
-def make_bures(problem, *, rollout=False, **_):
+def make_bures(problem, *, rollout=False, transition="exact", transition_kw=None, **_):
+    fq = tr.moment_map(transition, **(transition_kw or {}))
     m_np, S_np = _empirical_moments(problem.snaps)
     m, S = jnp.asarray(m_np), jnp.asarray(S_np)
     m1, S1 = m[1:], S[1:]
@@ -112,7 +116,7 @@ def make_bures(problem, *, rollout=False, **_):
     S1h = jnp.asarray(_sqrtm_psd(S_np[1:]))
 
     def loss(A, key=None):
-        mp, Sp = _predicted_moments(A, problem, m, S, rollout)
+        mp, Sp = _predicted_moments(A, problem, m, S, rollout, fq)
         C = S1h @ Sp @ S1h
         cross = jnp.sum(jnp.sqrt(jnp.clip(jnp.linalg.eigvalsh(C), 1e-12, None)), axis=-1)
         w2 = (jnp.sum((m1 - mp) ** 2, axis=-1)

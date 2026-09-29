@@ -21,7 +21,8 @@ class Stage:
     optimizer: str = "lbfgs"         # adam | lbfgs | cma | nelder_mead
     lam: float = 0.0                 # smooth-L1 weight on off-diagonal A
     # loss options (ignored by losses that do not use them)
-    transition: str = "exact"        # sw: exact | em
+    transition: str = "exact"        # all losses: exact | em
+    n_sub: int = 5                   # em substeps per interval
     n_proj: int = 200                # sw
     resample: bool = False           # sw: fresh projections + noise per eval
     floor: bool = True               # sw: apply the generator's expression floor
@@ -29,10 +30,12 @@ class Stage:
     opt_kwargs: dict = field(default_factory=dict, hash=False)
 
     def loss_kwargs(self):
+        tkw = {"transition": self.transition,
+               "transition_kw": {"n_sub": self.n_sub} if self.transition == "em" else None}
         if self.loss == "sw":
-            return {"transition": self.transition, "n_proj": self.n_proj,
+            return {**tkw, "n_proj": self.n_proj,
                     "resample": self.resample, "floor": self.floor}
-        return {"rollout": self.rollout}
+        return {**tkw, "rollout": self.rollout}
 
 
 @dataclass(frozen=True)

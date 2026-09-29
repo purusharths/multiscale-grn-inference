@@ -32,6 +32,33 @@ def ou_exact(A, sigma, dt):
     return F, 0.5 * (Q + Q.T)
 
 
+def ou_em(A, sigma, dt, n_sub):
+    """
+    Moment map of n_sub Euler-Maruyama substeps (floor ignored), same (F, Q)
+    contract as ou_exact: with B = I - hA,
+        F = B^n,   Q = sigma^2 h sum_{j<n} B^j B^jT.
+    """
+    G = A.shape[0]
+    h = dt / n_sub
+    B = jnp.eye(G) - h * A
+
+    def body(carry, _):
+        F, Q = carry
+        return (B @ F, B @ Q @ B.T + sigma**2 * h * jnp.eye(G)), None
+
+    (F, Q), _ = jax.lax.scan(body, (jnp.eye(G), jnp.zeros((G, G))), None, length=n_sub)
+    return F, 0.5 * (Q + Q.T)
+
+
+def moment_map(name, n_sub=5):
+    """(A, sigma, dt) -> (F, Q) for the moment losses."""
+    if name == "exact":
+        return ou_exact
+    if name == "em":
+        return lambda A, sigma, dt: ou_em(A, sigma, dt, n_sub)
+    raise ValueError(f"unknown transition {name!r}; choose 'exact' or 'em'")
+
+
 class Exact:
     name = "exact"
 

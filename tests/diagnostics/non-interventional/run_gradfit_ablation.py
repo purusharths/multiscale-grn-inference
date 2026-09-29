@@ -17,6 +17,9 @@ it answers:
   sanity
       truth_init_sw -- starts AT A_true; if it walks away, the SW minimum
       is not at the truth (loss bias, not optimizer failure)
+  Euler-Maruyama ablation (fit transition x GRN_GEN_SUBSTEPS generator)
+      lbfgs_kl vs lbfgs_kl_em, lbfgs_sw vs lbfgs_sw_em, kl_em_then_sw_em
+      -- see run_em_ablation_array.sh
 
 Every run reports recovery metrics and "check 0" (see _gradfit/metrics.py)
 under a common yardstick: SW, exact transition, 200 projections, held-out seeds.
@@ -53,6 +56,8 @@ def presets(l1):
     sw = dict(loss="sw", transition="exact", n_proj=200)
     lb = dict(optimizer="lbfgs", opt_kwargs={"steps": 500})
     kl = Stage(loss="kl", **lb)
+    kl_em = Stage(loss="kl", transition="em", **lb)
+    sw_em = Stage(**{**sw, "transition": "em"}, **lb)
     sw_lb = Stage(**sw, **lb)
     sw_adam = Stage(**sw, optimizer="adam", resample=True,
                     opt_kwargs={"steps": 1500, "lr": 1e-2})
@@ -74,12 +79,16 @@ def presets(l1):
         Config("kl_then_sw_l1", (kl, Stage(**sw, **lb, lam=l1))),
         Config("kl_then_sw_ms", (kl, sw_lb), n_starts=5),
         # model fidelity
-        Config("lbfgs_sw_em", (Stage(**{**sw, "transition": "em"}, **lb),)),
+        Config("lbfgs_sw_em", (sw_em,)),
         Config("lbfgs_sw_nofloor", (Stage(**sw, **lb, floor=False),)),
         # parameterization
         Config("lbfgs_sw_full", (sw_lb,), param="full"),
         # sanity
         Config("truth_init_sw", (sw_lb,), init="truth"),
+        # Euler-Maruyama ablation: pair with GRN_GEN_SUBSTEPS to cross the
+        # generator's discretisation with the fit's (see run_em_ablation_array.sh)
+        Config("lbfgs_kl_em", (kl_em,)),
+        Config("kl_em_then_sw_em", (kl_em, sw_em)),
     ]
     return {c.name: c for c in P}
 
@@ -97,6 +106,9 @@ def main():
     ap.add_argument("--l1", type=float, default=1e-4, help="lam for *_l1 presets")
     ap.add_argument("--out", default=os.path.join(
         REPO, "results", "diagnostics", "non-interventional", "gradfit"))
+    ap.add_argument("--run-name", default=None,
+                    help="fixed run folder name instead of a timestamp, so array "
+                         "tasks share one folder (merge with merge_gradfit_runs.py)")
     args = ap.parse_args()
 
     table = presets(args.l1)
@@ -105,8 +117,9 @@ def main():
     if unknown:
         sys.exit(f"unknown presets {unknown}; available: {list(table)}")
 
-    run_dir = os.path.join(args.out, time.strftime("%Y%m%d-%H%M%S")
-                           + f"_{gt.PERTURBATION}_amp{gt.SHIFT_FRACTION}")
+    gen = gt.GEN_SUBSTEPS
+    run_dir = os.path.join(args.out, args.run_name or (
+        time.strftime("%Y%m%d-%H%M%S") + f"_{gt.PERTURBATION}_amp{gt.SHIFT_FRACTION}"))
     os.makedirs(run_dir, exist_ok=True)
     rows = []
     for seed in [int(s) for s in args.seeds.split(",")]:
@@ -117,22 +130,31 @@ def main():
             cfg = table[name]
             print(f"[seed {seed}] {name} ...", flush=True)
             res = fit(problem, cfg)
-            row = {"preset": name, "data_seed": seed, "seconds": round(res.seconds, 2),
+            row = {"preset": name, "gen_substeps": gen, "data_seed": seed,
+                   "seconds": round(res.seconds, 2),
                    **metrics.recovery(res.A_hat, problem.A_true)}
+            # check 0 twice: under the exact-OU yardstick, and under the model
+            # that actually generated the data (EM at the generator's substeps)
             c0 = metrics.check0(problem, res.A_hat, loss="sw",
                                 transition="exact", n_proj=200)
             row.update({f"c0_{k}": v for k, v in c0.items()})
+            c0g = metrics.check0(problem, res.A_hat, loss="sw", transition="em",
+                                 transition_kw={"n_sub": gen}, n_proj=200)
+            row.update({f"c0gen_{k}": v for k, v in c0g.items()})
             rows.append(row)
-            with open(os.path.join(run_dir, f"{name}_seed{seed}.json"), "w") as fh:
+            with open(os.path.join(run_dir, f"{name}_gen{gen}_seed{seed}.json"), "w") as fh:
                 json.dump({"config": cfg.describe(), "metrics": row,
                            "A_hat": res.A_hat.tolist(), "A_true": problem.A_true.tolist(),
                            "best_start": res.best_start,
                            "start_logs": res.start_logs}, fh, indent=1, default=float)
             print("   " + "  ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}"
-                                    for k, v in row.items() if k not in ("preset", "data_seed")),
+                                    for k, v in row.items()
+                                    if k not in ("preset", "data_seed", "gen_substeps")),
                   flush=True)
 
-    with open(os.path.join(run_dir, "metrics.csv"), "w", newline="") as fh:
+    csv_name = ("metrics.csv" if args.run_name is None else
+                f"metrics_gen{gen}_{'+'.join(names)}_s{args.seeds.replace(',', '-')}.csv")
+    with open(os.path.join(run_dir, csv_name), "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rows[0]))
         w.writeheader()
         w.writerows(rows)

@@ -67,6 +67,13 @@ from multsc_grn_inference.datagen.non_stationary_sim import NetworkSimulatorNonS
 PERTURBATION = os.environ.get("GRN_PERTURBATION", "uniform")
 SHIFT_FRACTION = float(os.environ.get("GRN_PERTURB_AMP", 0.6))
 
+# Euler-Maruyama substeps per snapshot interval in the GENERATOR. 5 is the
+# historical default, but at dt=0.5 that is h=0.1 against decay rates up to ~2,
+# coarse enough that the data are measurably not samples of the true SDE: an
+# exact-OU fit scores BETTER than A_true on its own loss (gradfit run
+# 20260928-152916). Raise it (e.g. 50) for data that match the continuous model.
+GEN_SUBSTEPS = int(os.environ.get("GRN_GEN_SUBSTEPS", 5))
+
 # Floor applied by the generative stepper. Matches _ground_truth.py (0.05, not
 # 0.0) so a gene's expression never sits exactly at zero -- a fully-zero column
 # makes gaussian_kde's covariance singular.
@@ -108,15 +115,17 @@ def perturb(X0, mu0, rng, *, mode=None, amp=None):
                      f"choose 'uniform' or 'heterogeneous'")
 
 
-def make_snapshots(sim, n_cells, n_snapshots, dt, *, n_substeps=5, seed=0,
+def make_snapshots(sim, n_cells, n_snapshots, dt, *, n_substeps=None, seed=0,
                    shift_fraction=SHIFT_FRACTION):
     """
     Track n_cells particles forward from a perturbed start.
 
-    n_substeps=5 in the GENERATIVE process is deliberate and separate from the
-    fitting model's own discretization: the data should be a good sample of the
-    true SDE, whatever resolution the model being fitted happens to use.
+    n_substeps in the GENERATIVE process is separate from the fitting model's
+    own discretization: the data should be a good sample of the true SDE,
+    whatever resolution the model being fitted happens to use. Defaults to
+    GEN_SUBSTEPS (see the note there on why 5 is not enough).
     """
+    n_substeps = GEN_SUBSTEPS if n_substeps is None else n_substeps
     rng = np.random.default_rng(seed)
     data, _ = sim.simulate(T=0.05, num_samples=n_cells, save_every=1, dt=0.05)
     X = perturb(data[:, 0, :], sim.mu0, rng, amp=shift_fraction)
