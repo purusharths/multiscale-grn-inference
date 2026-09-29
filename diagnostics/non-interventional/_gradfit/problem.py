@@ -9,16 +9,17 @@ import numpy as np
 
 @dataclass
 class Problem:
-    snaps: jnp.ndarray            # (K, n_cells, G), same cells count per snapshot
-    mu: jnp.ndarray               # (G,), constant over time here
-    sigma: float                  # isotropic diffusion scale, treated as known
+    snaps: object                 # (K, n, G) array, or a list of (n_k, G) arrays
+                                  # (moment losses only; SW needs equal n)
+    mu: jnp.ndarray               # (G,), constant over time; the INIT when fitted
+    sigma: object                 # scalar or (G,) diffusion; the INIT when fitted
     dt: float                     # snapshot spacing
-    floor: float                  # expression floor used by the generator
+    floor: float | None           # expression floor used by the generator
     A_true: np.ndarray | None = None
 
     @property
     def n_genes(self) -> int:
-        return int(self.snaps.shape[-1])
+        return int(np.shape(self.snaps[0])[-1])
 
 
 def from_stationary_build(**build_kwargs) -> Problem:

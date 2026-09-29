@@ -15,6 +15,11 @@ from jax.scipy.linalg import expm
 JITTER = 1e-10
 
 
+def _diffusion(sigma, G):
+    """sigma^2 as a (G, G) diagonal: sigma may be a scalar or a per-gene vector."""
+    return jnp.diag(jnp.broadcast_to(jnp.asarray(sigma) ** 2, (G,)))
+
+
 def ou_exact(A, sigma, dt):
     """
     Exact discretisation: X' - mu = F (X - mu) + N(0, Q) with F = expm(-A dt),
@@ -24,8 +29,7 @@ def ou_exact(A, sigma, dt):
     gives F = B22^T and Q = F B12. One expm, differentiable in A.
     """
     G = A.shape[0]
-    eye = jnp.eye(G)
-    M = jnp.block([[A, sigma**2 * eye], [jnp.zeros((G, G)), -A.T]]) * dt
+    M = jnp.block([[A, _diffusion(sigma, G)], [jnp.zeros((G, G)), -A.T]]) * dt
     E = expm(M)
     F = E[G:, G:].T
     Q = F @ E[:G, G:]
@@ -36,15 +40,16 @@ def ou_em(A, sigma, dt, n_sub):
     """
     Moment map of n_sub Euler-Maruyama substeps (floor ignored), same (F, Q)
     contract as ou_exact: with B = I - hA,
-        F = B^n,   Q = sigma^2 h sum_{j<n} B^j B^jT.
+        F = B^n,   Q = h sum_{j<n} B^j diag(sigma^2) B^jT.
     """
     G = A.shape[0]
     h = dt / n_sub
     B = jnp.eye(G) - h * A
+    D = h * _diffusion(sigma, G)
 
     def body(carry, _):
         F, Q = carry
-        return (B @ F, B @ Q @ B.T + sigma**2 * h * jnp.eye(G)), None
+        return (B @ F, B @ Q @ B.T + D), None
 
     (F, Q), _ = jax.lax.scan(body, (jnp.eye(G), jnp.zeros((G, G))), None, length=n_sub)
     return F, 0.5 * (Q + Q.T)

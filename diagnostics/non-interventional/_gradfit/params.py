@@ -40,6 +40,37 @@ class PosDiag:
         return A.at[self.rows, self.cols].set(p["off"])
 
 
+class Model:
+    """
+    The full fitted parameter set. Wraps an A-parameterization and optionally
+    also fits mu (free vector) and a per-gene sigma (via log sigma). What is not
+    fitted is taken from the Problem inside the loss (losses.unpack).
+
+    theta dicts (numpy or jax) have keys "A", "mu", "sigma".
+    """
+
+    def __init__(self, A_param, G, learn_mu=False, learn_sigma=False):
+        self.A_param, self.G = A_param, G
+        self.learn_mu, self.learn_sigma = learn_mu, learn_sigma
+
+    def init(self, theta):
+        p = {"A": self.A_param.init(theta["A"])}
+        if self.learn_mu:
+            p["mu"] = jnp.asarray(theta["mu"], dtype=float)
+        if self.learn_sigma:
+            s = jnp.broadcast_to(jnp.asarray(theta["sigma"], dtype=float), (self.G,))
+            p["log_sigma"] = jnp.log(s)
+        return p
+
+    def to_theta(self, p):
+        th = {"A": self.A_param.to_A(p["A"])}
+        if "mu" in p:
+            th["mu"] = p["mu"]
+        if "log_sigma" in p:
+            th["sigma"] = jnp.exp(p["log_sigma"])
+        return th
+
+
 def get(name, G):
     if name == "full":
         return Full()
