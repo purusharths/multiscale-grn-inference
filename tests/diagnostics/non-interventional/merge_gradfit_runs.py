@@ -16,7 +16,7 @@ import sys
 import pandas as pd
 
 COLS = ["rel_fro", "offdiag_corr", "edge_auroc", "sign_acc_on_edges",
-        "c0_gap", "c0gen_gap", "c0sw_gap", "c0kl_gap", "seconds"]
+        "auprc", "c0_gap", "c0gen_gap", "c0sw_gap", "c0kl_gap", "seconds"]
 
 
 def main():
