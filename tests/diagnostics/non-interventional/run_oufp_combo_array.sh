@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=8G
+#SBATCH --mem=4G
 #SBATCH --partition=marmot,krikri
 #
 # The paper's loss terms in combination (run_oufp_combo_ablation.py), same
@@ -22,15 +22,18 @@
 #     seed  = SEEDS[(i / 6) % 3]
 #     cells = CELLS[(i / 18) % 4]
 #     genes = GENES[i / 72]
-# so --array=0-287 is the full grid, smallest networks first.
+# with i = 287 - SLURM_ARRAY_TASK_ID, so the array starts on the LARGEST
+# networks: those tasks take longest, and starting them last would leave the
+# run waiting on a tail of day-long fits.
 #
 # 1 cpu: the losses are numpy (sorts, KDE resampling), single-threaded.
-# Time limit covers the worst task (OU+FP+Cons, 20 genes, 10000 cells, ~13.6k
-# CMA-ES evaluations); see the timing in the commit that added this file.
+# Timing on marmot: ~7.5 s per evaluation for OU+FP+Cons at 20 genes x 10000
+# cells, so that fit (~13.6k evaluations) takes ~28 h; ~0.2-0.5 s per
+# evaluation at 5 genes x 500 cells. Whole grid ~900 CPU-hours.
 #
 # Submit from the REPO ROOT after `uv sync` on a login node, with logs/ present:
 #     mkdir -p logs
-#     sbatch --array=0-287%96 tests/diagnostics/non-interventional/run_oufp_combo_array.sh
+#     sbatch --array=0-287%128 tests/diagnostics/non-interventional/run_oufp_combo_array.sh
 # Then:
 #     .venv/bin/python tests/diagnostics/non-interventional/merge_gradfit_runs.py \
 #         results/diagnostics/non-interventional/oufp/oufp-combo
@@ -47,13 +50,14 @@ CELLS=(500 1000 3000 10000)
 SEEDS=(42 43 44)
 COMBOS=(OU FP OU+FP OU+Cons FP+Cons OU+FP+Cons)
 
-i=${SLURM_ARRAY_TASK_ID:-0}
 nc=${#COMBOS[@]}; ns=${#SEEDS[@]}; nl=${#CELLS[@]}
 max=$(( nc * ns * nl * ${#GENES[@]} - 1 ))
-if (( i > max )); then
-    echo "ERROR: array index $i exceeds $max" >&2
+t=${SLURM_ARRAY_TASK_ID:-0}
+if (( t > max )); then
+    echo "ERROR: array index $t exceeds $max" >&2
     exit 1
 fi
+i=$(( max - t ))
 COMBO=${COMBOS[$(( i % nc ))]}
 SEED=${SEEDS[$(( (i / nc) % ns ))]}
 NC=${CELLS[$(( (i / (nc * ns)) % nl ))]}
