@@ -28,6 +28,7 @@ class Stage:
     floor: bool = True               # sw: apply the generator's expression floor
     rollout: bool = False            # kl/bures: multi-step moment propagation
     shrinkage: object = None         # kl/bures: None | "lw" | float (see losses)
+    terms: tuple = ("ou",)           # oufp: subset of ("ou", "fp", "cons")
     opt_kwargs: dict = field(default_factory=dict, hash=False)
 
     def loss_kwargs(self):
@@ -36,6 +37,9 @@ class Stage:
         if self.loss == "sw":
             return {**tkw, "n_proj": self.n_proj,
                     "resample": self.resample, "floor": self.floor}
+        if self.loss == "oufp":
+            return {**tkw, "n_proj": self.n_proj, "floor": self.floor,
+                    "terms": self.terms}
         return {**tkw, "rollout": self.rollout, "shrinkage": self.shrinkage}
 
 

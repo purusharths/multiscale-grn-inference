@@ -10,6 +10,13 @@ dict {"A", optionally "mu", "sigma"} when those are being fitted too.
          EMPIRICAL moments of snapshot k, KL(empirical || predicted). Exact for
          the linear-Gaussian model, deterministic, no particles.
   bures  same moments, Bures-Wasserstein W2^2 instead of KL.
+  oufp   the paper's Algorithm 1 terms (src/.../compute_loss.py), any subset
+         of {"ou", "fp", "cons"}, summed over intervals, with gradients:
+           ou    SW(Phi_OU(X_k), X_{k+1})       observed cells pushed forward
+           fp    SW(Phi_OU(KDE(X_k)), X_{k+1})  KDE-resampled cells pushed
+           cons  SW(Phi_OU(X_k), Phi_OU(KDE(X_k)))
+         Snapshots may differ in size (quantile interpolation, as in
+         compute_loss._sliced_w2).
 
 Every loss takes transition="exact" | "em" (with transition_kw={"n_sub": n}),
 so the fit's discretisation can be matched to, or ablated against, the
@@ -156,7 +163,108 @@ def make_bures(problem, *, rollout=False, transition="exact", transition_kw=None
     return loss
 
 
-BUILDERS = {"sw": make_sw, "kl": make_kl, "bures": make_bures}
+def _quantile_gather(n_from, n_to):
+    """(i0, i1, w) so that sorted[i0]*(1-w) + sorted[i1]*w is sorted's linear
+    interpolation at n_to evenly spaced quantile levels -- compute_loss.
+    _sliced_w2's scheme, precomputed because sizes are known up front."""
+    pos = np.linspace(0.0, 1.0, n_to) * (n_from - 1)
+    i0 = np.floor(pos).astype(int)
+    i1 = np.minimum(i0 + 1, n_from - 1)
+    return i0, i1, (pos - i0)[:, None]
+
+
+def _at_quantiles(sorted_, g):
+    if g is None:
+        return sorted_
+    i0, i1, w = g
+    return sorted_[i0] * (1 - w) + sorted_[i1] * w
+
+
+def _sw_setup(n_pred, n_other):
+    n = min(n_pred, n_other)
+    return (n,
+            None if n_pred == n else _quantile_gather(n_pred, n),
+            None if n_other == n else _quantile_gather(n_other, n))
+
+
+def kde_resample(X, rng, n=None):
+    """scipy.stats.gaussian_kde(X.T).resample(n): pick cells uniformly, add
+    N(0, h^2 Cov) with Scott's h = n^(-1/(G+4)). Independent of theta, so it is
+    drawn once and the FP term stays differentiable. Note h -> 1 as G grows
+    (0.93 at G=100, n=2000): the resampled cloud then carries ~(1+h^2) x the
+    data covariance -- the bias compute_loss.py's docstring describes."""
+    X = np.asarray(X, dtype=float)
+    N, G = X.shape
+    n = n or N
+    h = N ** (-1.0 / (G + 4))
+    C = np.atleast_2d(np.cov(X, rowvar=False)) * h**2
+    L = np.linalg.cholesky(C + 1e-9 * np.eye(G))
+    return X[rng.integers(0, N, n)] + rng.standard_normal((n, G)) @ L.T
+
+
+def make_oufp(problem, *, terms=("ou",), n_proj=200, floor=True, seed=0,
+              transition="exact", transition_kw=None, **_):
+    terms = tuple(terms)
+    bad = set(terms) - {"ou", "fp", "cons"}
+    if bad or not terms:
+        raise ValueError(f"terms must be a non-empty subset of ou/fp/cons, got {terms}")
+    trans = tr.get(transition, **(transition_kw or {}))
+    snaps_np = [np.asarray(x, dtype=float) for x in problem.snaps]
+    snaps = [jnp.asarray(x) for x in snaps_np]
+    G = problem.n_genes
+    fl = problem.floor if floor else None
+    rng = np.random.default_rng(seed)
+    dirs = rng.standard_normal((n_proj, G))
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    # everything random is drawn ONCE (common random numbers): KDE particles
+    # for the FP arm and the OU noise for both arms
+    kde = []
+    for x in snaps_np[:-1]:
+        r = kde_resample(x, rng)
+        kde.append(jnp.asarray(np.maximum(r, fl) if fl is not None else r))
+    xi_ou = [jnp.asarray(rng.standard_normal(trans.noise_shape(1, x.shape[0], G))[0])
+             for x in snaps_np[:-1]]
+    xi_fp = [jnp.asarray(rng.standard_normal(trans.noise_shape(1, x.shape[0], G))[0])
+             for x in snaps_np[:-1]]
+    # The observed side of every OU/FP comparison does not depend on theta:
+    # sort and interpolate it here, in numpy. Left inside the traced loss, XLA
+    # constant-folds those sorts at compile time (~1.5 min EACH at 2000 x 300).
+    K = len(snaps_np) - 1
+    to_next = []
+    for k in range(K):
+        n, g_pred, g_obs = _sw_setup(snaps_np[k].shape[0], snaps_np[k + 1].shape[0])
+        obs = _at_quantiles(np.sort(snaps_np[k + 1] @ dirs.T, axis=0), g_obs)
+        to_next.append((g_pred, jnp.asarray(obs)))
+    dirs = jnp.asarray(dirs)
+
+    def sw_obs(pred, k):
+        g, obs = to_next[k]
+        return jnp.mean((_at_quantiles(jnp.sort(pred @ dirs.T, axis=0), g) - obs) ** 2)
+
+    def sw_pred(a, b):   # cons: both clouds depend on theta, same size
+        return jnp.mean((jnp.sort(a @ dirs.T, axis=0) - jnp.sort(b @ dirs.T, axis=0)) ** 2)
+
+    def loss(theta, key=None):
+        A, mu, sigma = unpack(theta, problem)
+        dt = problem.dt
+        total = 0.0
+        for k in range(K):
+            ou = trans.push(snaps[k], A, mu, sigma, dt, xi_ou[k], fl) \
+                if ("ou" in terms or "cons" in terms) else None
+            fp = trans.push(kde[k], A, mu, sigma, dt, xi_fp[k], fl) \
+                if ("fp" in terms or "cons" in terms) else None
+            if "ou" in terms:
+                total += sw_obs(ou, k)
+            if "fp" in terms:
+                total += sw_obs(fp, k)
+            if "cons" in terms:
+                total += sw_pred(ou, fp)
+        return total
+
+    return loss
+
+
+BUILDERS = {"sw": make_sw, "kl": make_kl, "bures": make_bures, "oufp": make_oufp}
 
 
 def build(problem, name, **kw):

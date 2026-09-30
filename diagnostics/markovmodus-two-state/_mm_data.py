@@ -38,7 +38,8 @@ class StateSeries:
     snaps: list                # per time: (n_t, G) log-normalized expression
     n_cells: np.ndarray        # cells per snapshot
     genes: list
-    target_counts: np.ndarray  # markovmodus state_expression row (spliced target)
+    target_counts: np.ndarray | None  # simulator's per-state spliced target, if known
+                                      # (markovmodus only; None on real data)
 
 
 def log_normalize(counts):
@@ -55,7 +56,8 @@ def load(path=DATA, min_cells=2):
     tp = np.asarray(a.obs["timepoint"], dtype=float)
     st = np.asarray(a.obs["state_label"].astype(str))
     labels = list(a.obs["state_label"].cat.categories)
-    se = np.asarray(a.uns["state_expression"], dtype=float)
+    se = (np.asarray(a.uns["state_expression"], dtype=float)
+          if "state_expression" in a.uns else None)
     out = {}
     for k, s in enumerate(labels):
         times, snaps = [], []
@@ -66,5 +68,6 @@ def load(path=DATA, min_cells=2):
                 snaps.append(X[m])
         out[s] = StateSeries(state=s, times=np.asarray(times), snaps=snaps,
                              n_cells=np.array([len(x) for x in snaps]),
-                             genes=list(a.var_names), target_counts=se[k])
+                             genes=list(a.var_names),
+                             target_counts=None if se is None else se[k])
     return out, a

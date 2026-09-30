@@ -103,7 +103,12 @@ def summarize(theta, series, dt):
     pred = mean_rollout(theta, series, dt)
     ss_res = ((obs[1:] - pred[1:]) ** 2).sum()
     ss_tot = ((obs[1:] - obs[1:].mean(axis=0)) ** 2).sum()
-    target_log = np.log1p(series.target_counts / series.target_counts.sum() * _mm_data.TARGET_SUM)
+    if series.target_counts is not None:
+        tc = series.target_counts
+        target_log = np.log1p(tc / tc.sum() * _mm_data.TARGET_SUM)
+        mu_corr = float(np.corrcoef(np.asarray(theta["mu"]), target_log)[0, 1])
+    else:
+        mu_corr = float("nan")   # no simulator ground truth (real data)
     return {
         "state": series.state,
         "times": series.times.tolist(),
@@ -116,7 +121,7 @@ def summarize(theta, series, dt):
         "n_edges_gt_1pct_diag": int((np.abs(A[off]) > 0.01 * d).sum()),
         "max_abs_offdiag": float(np.abs(A[off]).max()),
         "mean_rollout_r2": float(1 - ss_res / ss_tot) if ss_tot > 0 else float("nan"),
-        "mu_vs_target_corr": float(np.corrcoef(np.asarray(theta["mu"]), target_log)[0, 1]),
+        "mu_vs_target_corr": mu_corr,
         "sigma_mean": float(np.asarray(theta["sigma"]).mean()),
     }
 
